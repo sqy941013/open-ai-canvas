@@ -8,9 +8,12 @@ import { formatTaskKind, statusLabel } from "@/lib/generation-task-display";
 import { canvasThemes } from "@/lib/canvas-theme";
 import type { GenerationTask } from "@/services/api/task-center";
 import { useThemeStore } from "@/stores/use-theme-store";
+import { useUserStore } from "@/stores/use-user-store";
 
-export function CanvasActiveTaskPanel({ tasks }: { tasks: GenerationTask[] }) {
+// 顶栏是绝对定位浮层，面板必须按调用方传入的 topInset 避让；专注模式隐藏顶栏时传小间距。
+export function CanvasActiveTaskPanel({ tasks, align = "right", topInset = "var(--canvas-topbar-offset)" }: { tasks: GenerationTask[]; align?: "left" | "right"; topInset?: string }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    const creditsEnabled = useUserStore((state) => state.features.creditsEnabled);
     const reducedMotion = useReducedMotion();
     const [now, setNow] = useState(() => Date.now());
     const [open, setOpen] = useState(false);
@@ -39,7 +42,8 @@ export function CanvasActiveTaskPanel({ tasks }: { tasks: GenerationTask[] }) {
                 animate={{ opacity: 1, y: 0, scale: 1 }}
                 exit={{ opacity: 0, y: -8, scale: 0.98 }}
                 transition={motionTransition}
-                className="pointer-events-none absolute right-3 top-[72px] z-[var(--z-modal-overlay)] w-[min(332px,calc(100vw-24px))]"
+                className={`pointer-events-none absolute z-[var(--z-panel-floating)] w-[var(--canvas-panel-width)] ${align === "left" ? "left-3" : "right-3"}`}
+                style={{ top: topInset }}
             >
                 <LayoutGroup id="canvas-active-tasks">
                     <motion.section
@@ -91,6 +95,7 @@ export function CanvasActiveTaskPanel({ tasks }: { tasks: GenerationTask[] }) {
                                             expanded={expandedTaskId === task.id}
                                             onToggle={() => setExpandedTaskId((current) => current === task.id ? null : task.id)}
                                             reducedMotion={Boolean(reducedMotion)}
+                                            creditsEnabled={creditsEnabled}
                                         />
                                     ))}
                                 </motion.div>
@@ -103,7 +108,7 @@ export function CanvasActiveTaskPanel({ tasks }: { tasks: GenerationTask[] }) {
     );
 }
 
-function ActiveTaskCard({ task, now, theme, expanded, onToggle, reducedMotion }: { task: GenerationTask; now: number; theme: (typeof canvasThemes)[keyof typeof canvasThemes]; expanded: boolean; onToggle: () => void; reducedMotion: boolean }) {
+function ActiveTaskCard({ task, now, theme, expanded, onToggle, reducedMotion, creditsEnabled }: { task: GenerationTask; now: number; theme: (typeof canvasThemes)[keyof typeof canvasThemes]; expanded: boolean; onToggle: () => void; reducedMotion: boolean; creditsEnabled: boolean }) {
     const progress = typeof task.progress === "number" ? Math.max(0, Math.min(100, Math.round(task.progress))) : task.status === "queued" ? 0 : undefined;
     const startedAt = task.startedAt || task.createdAt;
     const elapsedMs = Math.max(0, now - parseTime(startedAt));
@@ -170,9 +175,9 @@ function ActiveTaskCard({ task, now, theme, expanded, onToggle, reducedMotion }:
                         <span className="font-medium tabular-nums" style={{ color: statusTone }}>{progress}%</span>
                     </div>
                 ) : (
-                    <div className="mt-3 grid grid-cols-2 gap-2 text-[var(--fs-tiny)]" style={{ color: theme.node.muted }}>
+                    <div className={`mt-3 grid gap-2 text-[var(--fs-tiny)] ${creditsEnabled ? "grid-cols-2" : "grid-cols-1"}`} style={{ color: theme.node.muted }}>
                         <span className="inline-flex min-w-0 items-center gap-1 truncate" title={durationLabel}><Clock3 className="size-3 shrink-0" />{durationLabel}</span>
-                        <span className="inline-flex min-w-0 items-center justify-end gap-1 truncate" title={billingLabel}><Coins className="size-3 shrink-0" />{billingLabel}</span>
+                        {creditsEnabled ? <span className="inline-flex min-w-0 items-center justify-end gap-1 truncate" title={billingLabel}><Coins className="size-3 shrink-0" />{billingLabel}</span> : null}
                     </div>
                 )}
             </button>

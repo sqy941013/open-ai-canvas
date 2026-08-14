@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/ddcat-ai/open-ai-canvas"><img src="https://img.shields.io/github/stars/ddcat-ai/open-ai-canvas?style=flat-square&logo=github" alt="GitHub stars"></a>
-  <a href="VERSION"><img src="https://img.shields.io/badge/version-v1.0.7-2563eb?style=flat-square" alt="Version"></a>
+  <a href="VERSION"><img src="https://img.shields.io/badge/version-v1.0.43-2563eb?style=flat-square" alt="Version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-f97316?style=flat-square" alt="License"></a>
 </p>
 
@@ -28,10 +28,19 @@
 
 ## 赞助商
 
-| 赞助商 | 网站 | 说明 |
-| --- | --- | --- |
-| <img src="assets/artdance.png" alt="ArtDance" width="160"> | [ArtDance](https://artbox.top) | 本项目 Seedance 模型的天使投资人。 |
+| LOGO | 类型 | 赞助商名称 | 说明 | 网站 |
+| --- | --- | --- | --- | --- |
+| <img src="assets/artdance.png" alt="ArtDance" width="160"> | 商业 | ArtDance | 本项目 Seedance 模型的天使投资人。 | [artbox.top](https://artbox.top) |
+| <img src="assets/sponsor1.svg" alt="快乐机艺术小组" width="160"> | 团队 | 快乐机艺术小组 | 快乐机艺术小组，一支跨学科的艺术创作团队，持续探索数字+艺术的全新表达形式。 | 暂无 |
 
+## 团队成员
+
+| 头像 | 昵称 | 邮箱 | 个性签名 |
+| --- | --- | --- | --- |
+| <img src="assets/user-sikongyue.png" alt="爱笑的毛毛虫" width="80"> | 爱笑的毛毛虫<br><sub>用户名：sikongyue</sub> | [315515767@qq.com](mailto:315515767@qq.com) | 正在啃 main 分支，争取下次 merge 的时候变成蝴蝶 |
+| <img src="assets/user-delve.jpg" alt="delve-s" width="80"> | delve-s | [3013141136@qq.com](mailto:3013141136@qq.com) | 我亦无他，惟手熟尔 |
+| <img src="assets/user-CyrusAuyeung.jpg" alt="CyrusAuyeung" width="80"> | CyrusAuyeung | [cyrusauyeungho@gmail.com](mailto:cyrusauyeungho@gmail.com) | HKUST(GZ) UG |
+| <img src="assets/user-nz.jpg" alt="奶大佬" width="80"> | 奶大佬 | [1304634970@qq.com](mailto:1304634970@qq.com) | 人生就是要不断的探索 |
 
 ## 主要功能
 
@@ -40,7 +49,7 @@
 - **影视工作流**：结构化分镜脚本、角色卡、批量镜头节点、3D 导演台和控制图回写。
 - **任务与素材**：后端异步队列、任务日志、失败重试、素材库及登录后的后端同步。
 - **Agent 能力**：网页画布助手、本地 Canvas Agent、Codex App 插件和技能库。
-- **管理与安全**：用户与系统渠道、用量分析、私有 OSS、资源归属校验和敏感配置加密。
+- **管理与安全**：用户与系统渠道、用量分析、阿里云 OSS / 腾讯云 COS 私有对象存储、资源归属校验和敏感配置加密。
 
 ## 界面预览
 
@@ -111,6 +120,82 @@ curl -fsSL https://raw.githubusercontent.com/ddcat-ai/open-ai-canvas/main/script
 
 部署配置和 PostgreSQL 密码保存在 `/opt/open-ai-canvas/.env`，不要发送给他人，也不要删除 `backend-data`、`postgres-data` 和 `redis-data` 数据卷。数据卷持久化不等于备份，请定期备份 PostgreSQL 和上传文件。直接使用 IP 访问仅适合首次配置；公网长期使用必须绑定域名并配置 HTTPS。
 
+## 生产环境文本 SSE
+
+文本任务事件流是登录态接口 `GET /api/tasks/:id/text-events`。它只发送当前用户有权限访问的文本任务增量，响应类型为 `text/event-stream`；事件 `delta` 的 `id` 是单调递增的文本序号，`terminal` 表示任务已经成功、失败或取消。生产反向代理必须对这一条路径关闭响应缓冲和缓存，并允许长时间读取；不要把这些设置复制到所有 `/api/` 请求上。
+
+### Nginx
+
+如果 Docker Compose 的网页容器暴露在本机 `3000` 端口，在 HTTPS server 中加入以下规则，并放在通用 `/api/` 规则之前。`proxy_pass` 也可以按你的部署拓扑改成实际网页入口；不要把后端 `8080` 直接暴露到公网。
+
+```nginx
+location ~ ^/api/tasks/[^/]+/text-events$ {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_buffering off;
+    proxy_cache off;
+    gzip off;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+}
+```
+
+项目镜像内的 `nginx.conf` 已包含同等规则，并只对 `/api/tasks/<id>/text-events` 关闭缓冲。外层 Nginx 和镜像内 Nginx 都存在时，两层都要保留该路径的流式设置；任一层重新缓冲都会让浏览器看起来直到任务结束才收到增量。
+
+### Caddy
+
+Caddy 终止 HTTPS 后，将网页入口转发到 Compose 暴露的 `3000` 端口。`flush_interval -1` 让事件立即下发，长 `read_timeout` 防止长文本任务被网关主动断开：
+
+```caddyfile
+canvas.example.com {
+    @textEvents path_regexp textEvents ^/api/tasks/[^/]+/text-events$
+    reverse_proxy @textEvents 127.0.0.1:3000 {
+        flush_interval -1
+        transport http {
+            read_timeout 1h
+        }
+        header_up X-Forwarded-Proto {scheme}
+        header_down Cache-Control "no-cache, no-transform"
+    }
+
+    reverse_proxy 127.0.0.1:3000
+}
+```
+
+HTTPS 不是可选项：事件流使用登录 Cookie，用户配置的模型凭据也会参与请求；公网浏览器到反向代理的链路必须使用 HTTPS，并保留 `Host`、`X-Forwarded-For` 和 `X-Forwarded-Proto`。反向代理到网页容器可以使用隔离的 Compose 内网 HTTP。不要通过放宽 CORS、关闭鉴权或把 `Last-Event-ID` 放进 URL 来解决断线问题。
+
+### Docker 与健康检查
+
+`docker-compose.deploy.yml` / `docker-compose.server.yml` 只需要对外暴露网页容器的 `3000`；后端 `8080` 留在 Compose 网络内。部署后先确认容器健康：
+
+```bash
+sudo docker compose --env-file .env -f docker-compose.deploy.yml -f docker-compose.build.yml ps
+curl -fsS https://canvas.example.com/api/health
+```
+
+网页容器和后端镜像都带健康检查：网页检查 `/`，后端检查 `/api/health`。健康检查只能证明 HTTP 入口可用，不能证明代理正在逐事件转发；SSE 仍需按下面的命令验证。
+
+### 断线恢复与排障
+
+客户端重连时可以发送 `Last-Event-ID: <最后收到的序号>`，也可以使用 `?after=<序号>`；查询参数优先。服务端只返回 `sequence > after` 的 `delta`，因此同一段文本不会因为重连重复拼接。游标来自 SSE `id`，不是任务 ID。成功任务的增量保留 24 小时，失败或取消任务保留 7 天；超出保留期时应读取任务详情中的最终正文或失败草稿。
+
+在已登录浏览器中复制 `open_ai_canvas_session` Cookie 后，可用 `curl -N` 检查首字节和增量是否在任务运行期间到达：
+
+```bash
+curl -N --http1.1 \
+  -H 'Accept: text/event-stream' \
+  -H 'Last-Event-ID: 0' \
+  -b 'open_ai_canvas_session=<登录 Cookie>' \
+  'https://canvas.example.com/api/tasks/<task-id>/text-events'
+```
+
+正常输出会先出现 `: connected`，随后是带 `id` 的 `event: delta`，最后是 `event: terminal`。如果只在任务结束后一次性出现全部内容，检查每一层是否仍有 `proxy_buffering on`、缓存规则或 gzip；如果长时间没有任何字节，检查 `proxy_read_timeout`、HTTPS 连接和后端容器日志。该排障命令只针对文本事件流，其他 API 仍使用默认缓存、安全和超时策略。
+
 ## 本地开发
 
 需要 Bun、Go 和可用的 OpenAI 兼容模型渠道。
@@ -169,7 +254,7 @@ docker compose -f docker-compose.local.yml up -d --build
 
 - 用户自定义 AI API Key 保存在浏览器本地；登录态拉取模型目录时会临时提交给自部署后端但不会保存，创建异步任务时会加密入队；仅应使用可信部署，生产环境必须启用 HTTPS。
 - 画布和素材登录后同步到后端，本地 `localForage` 继续承担缓存和降级存储。
-- 媒体资源在启用 OSS 时保存到私有 OSS，否则保存到后端数据目录；删除业务记录不会自动清理 OSS 对象。
+- 媒体资源在启用对象存储时可保存到私有阿里云 OSS 或腾讯云 COS，否则保存到后端数据目录；删除业务记录不会自动清理远端对象。
 - 用户主动上传、Agent 会话附件和 AI 生成资源的单文件上限、账号容量及 UTC 日上传总量由后台“资源与策略”统一维护，默认分别为 50MB、32MB、64MB、2GB 和 200MB；管理员可按可信部署需要调整，单文件业务上限最高 999MB，Nginx 请求体硬上限为 1024MB。
 
 ## 公网部署安全
@@ -192,13 +277,5 @@ docker compose -f docker-compose.local.yml up -d --build
 ## 上游致谢与二次开发
 
 本项目基于 [basketikun/infinite-canvas](https://github.com/basketikun/infinite-canvas) `v0.5.0`（提交 `568f0f1838df8de31fe885a4e130e2f346dd14ab`）进行二次开发。上游项目由 `basketikun` 维护，该基线提交作者为 `HouYunFei`；上游作者和贡献者继续保留其对应代码的权利与署名。
-
-当前二次开发由 `ddcat` 维护，主要改动包括：
-
-- 新增 Go/Gin/GORM/PostgreSQL/SQLite 多用户后端、登录会话、管理员后台、异步任务中心和用量分析。
-- 新增私有 OSS、后端资源存储、跨设备画布与素材同步、公开只读分享和资源归属校验。
-- 扩展文本、图片、视频和音频生成，增加影视分镜、短剧流水线、角色参考与 3D 导演台。
-- 重构画布工作区、交互状态和 Aceternity 风格空间 UI，并增强 Canvas Agent 与 Codex App 插件。
-- 收敛上游代理、任务密钥、上传额度、日志脱敏和公网部署安全边界。
 
 漏洞请按 [SECURITY.md](SECURITY.md) 提交。项目采用 [AGPL-3.0](LICENSE) 协议。

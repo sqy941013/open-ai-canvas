@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { ArrowUp, AtSign, Boxes, ChevronDown, FileText, ImageIcon, ImagePlus, Maximize2, Music2, Pencil, SlidersHorizontal, Square, UserRound, Video } from "lucide-react";
-import { Button, Modal, Tooltip } from "antd";
+import { Button, Image as AntImage, Modal, Tooltip } from "antd";
 
 import { ModelPicker } from "@/components/model-picker";
-import { configuredModelMatchesCapability, defaultConfig, modelOptionName, resolveModelChannel, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { defaultConfig, modelOptionName, resolveModelChannel, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { resolveCanvasGenerationModel } from "@/lib/canvas/canvas-project-generation";
 import { CreditSymbol, requestCreditCost } from "@/constant/credits";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { normalizeVideoDuration, normalizeVideoResolution } from "@/lib/video-generation-options";
+import { resolveCompatibleModel, type ModelRequirements } from "@/lib/model-selection";
 import { navigateToSettings } from "@/lib/settings-navigation";
 import { useThemeStore } from "@/stores/use-theme-store";
+import { useUserStore } from "@/stores/use-user-store";
 import { CanvasImageSettingsPopover } from "./canvas-image-settings-popover";
 import { CanvasAudioSettingsPopover, type CanvasAudioSettingKey } from "./canvas-audio-settings-popover";
 import { CanvasResourceMentionTextarea } from "./canvas-resource-mention-textarea";
@@ -39,9 +42,9 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     const globalConfig = useEffectiveConfig();
     const themeName = useThemeStore((state) => state.theme);
     const theme = canvasThemes[themeName];
+    const creditsEnabled = useUserStore((state) => state.features.creditsEnabled);
     const simpleMode = workspaceMode === "simple";
     const mode = defaultMode(node.type);
-    const config = buildNodeConfig(globalConfig, node, mode);
     const hasTextContent = node.type === CanvasNodeType.Text && Boolean(node.metadata?.content?.trim());
     const hasImageContent = node.type === CanvasNodeType.Image && Boolean(node.metadata?.content);
     const savedPrompt = node.metadata?.composerContent ?? node.metadata?.prompt ?? "";
@@ -51,23 +54,37 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     const [expandedPromptOpen, setExpandedPromptOpen] = useState(false);
     const [promptContentHeight, setPromptContentHeight] = useState(0);
     const [paramsExpanded, setParamsExpanded] = useState(false); // #98 决策2：B区参数区折叠状态（手风琴）
+    const activeReferences = mentionReferences.filter((item) => item.active && item.kind !== "skill");
+    const requirements: ModelRequirements = {
+        capability: mode,
+        input: {
+            textCount: (prompt.trim() ? 1 : 0) + activeReferences.filter((item) => item.kind === "text").length,
+            imageCount: activeReferences.filter((item) => item.kind === "image").length,
+            videoCount: activeReferences.filter((item) => item.kind === "video").length,
+            audioCount: activeReferences.filter((item) => item.kind === "audio").length,
+            characterCount: activeReferences.filter((item) => item.kind === "character").length,
+        },
+        videoOperation: node.metadata?.videoEditOperation,
+        videoSeconds: node.metadata?.seconds || globalConfig.videoSeconds,
+    };
+    const config = buildNodeConfig(globalConfig, node, mode, requirements);
     const generationCount = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const priceChannel = resolveModelChannel(config, config.model);
-    const credits = requestCreditCost({ channelMode: priceChannel.scope === "system" ? "remote" : "local", modelCosts: priceChannel.modelCosts, model: modelOptionName(config.model), count: mode === "image" ? generationCount : 1, seconds: mode === "video" ? config.videoSeconds : 1 });
-    const activeReferenceCount = mentionReferences.filter((item) => item.active && item.kind !== "skill").length;
-    const videoFrameOptions = mentionReferences
-        .filter((item) => item.active && item.kind === "image")
-        .map((item) => ({ nodeId: item.nodeId, label: item.label, title: item.title, previewUrl: item.previewUrl }));
+    const credits = requestCreditCost({
+        channelMode: priceChannel.scope === "system" ? "remote" : "local",
+        modelCosts: priceChannel.modelCosts,
+        model: modelOptionName(config.model),
+        count: mode === "image" ? generationCount : 1,
+        seconds: mode === "video" ? config.videoSeconds : 1,
+    });
+    const activeReferenceCount = activeReferences.length;
+    const videoFrameOptions = mentionReferences.filter((item) => item.active && item.kind === "image").map((item) => ({ nodeId: item.nodeId, label: item.label, title: item.title, previewUrl: item.previewUrl }));
     const darkSurface = themeName === "dark";
     const monochromeAccent = theme.node.activeStroke;
     const shellBorder = darkSurface ? "rgba(255,255,255,.08)" : "rgba(15,23,42,.08)";
     const insetBorder = darkSurface ? "rgba(255,255,255,.06)" : "rgba(15,23,42,.07)";
-    const shellSurface = darkSurface
-        ? theme.canvas.background
-        : "rgba(250,251,252,.97)";
-    const composerSurface = darkSurface
-        ? theme.canvas.background
-        : "rgba(15,23,42,.025)";
+    const shellSurface = darkSurface ? theme.canvas.background : "rgba(250,251,252,.97)";
+    const composerSurface = darkSurface ? theme.canvas.background : "rgba(15,23,42,.025)";
     const controlSurface = darkSurface ? theme.canvas.background : "rgba(15,23,42,.045)";
     const controlsSurface = darkSurface ? controlSurface : "transparent";
     const shellShadow = darkSurface ? `0 22px 60px ${theme.spatial.shadow}, 0 2px 8px rgba(0,0,0,.22)` : "0 12px 32px rgba(15,23,42,.10), 0 1px 2px rgba(15,23,42,.06)";
@@ -75,12 +92,12 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     const modalShadow = darkSurface ? `0 30px 90px ${theme.spatial.shadow}` : "0 24px 72px rgba(15,23,42,.16)";
     const referenceShelfHeight = activeReferenceCount ? 42 : 0;
     const composerMinHeight = activeReferenceCount ? 82 : 58;
-    const composerHeight = Math.min(144, Math.max(composerMinHeight, Math.ceil(promptContentHeight + referenceShelfHeight)));
+    const composerHeight = Math.min(224, Math.max(composerMinHeight, Math.ceil(promptContentHeight + referenceShelfHeight)));
     const isSubmitDisabled = !isRunning && !prompt.trim();
     const canExpandPrompt = mode === "image" || mode === "video";
     const isPortraitTexture = mode === "image" && Boolean(node.metadata?.portraitTexture);
     const updatePromptContentHeight = useCallback((height: number) => {
-        setPromptContentHeight((current) => Math.abs(current - height) < 1 ? current : height);
+        setPromptContentHeight((current) => (Math.abs(current - height) < 1 ? current : height));
     }, []);
 
     useEffect(() => {
@@ -139,11 +156,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     const renderComposerHeader = (expanded: boolean) => (
         <div className="flex min-w-0 items-center gap-1 px-0.5">
             {isPortraitTexture ? (
-                <CanvasPortraitTexturePopover
-                    value={node.metadata?.portraitTexture}
-                    placement={expanded ? "topRight" : "topLeft"}
-                    onChange={(portraitTexture) => onConfigChange(node.id, { portraitTexture })}
-                />
+                <CanvasPortraitTexturePopover value={node.metadata?.portraitTexture} placement={expanded ? "topRight" : "topLeft"} onChange={(portraitTexture) => onConfigChange(node.id, { portraitTexture })} />
             ) : (
                 <div className="flex h-6 min-w-0 items-center gap-1 rounded-md px-1.5 transition-colors hover:bg-white/[.04]" style={{ background: controlSurface }}>
                     <span className="grid size-3.5 shrink-0 place-items-center" style={{ color: monochromeAccent }}>
@@ -152,16 +165,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                     <span className="truncate text-[var(--fs-tiny)] font-medium">{modeDisplayName(mode)}创作</span>
                 </div>
             )}
-            {!simpleMode ? (
-                <CanvasPresetPicker
-                    mode={mode}
-                    skillReferences={skillReferences}
-                    open={expanded ? expandedPresetOpen : presetOpen}
-                    onOpenChange={expanded ? setExpandedPresetOpen : setPresetOpen}
-                    onSelect={applyPreset}
-                    dense
-                />
-            ) : null}
+            {!simpleMode ? <CanvasPresetPicker mode={mode} skillReferences={skillReferences} open={expanded ? expandedPresetOpen : presetOpen} onOpenChange={expanded ? setExpandedPresetOpen : setPresetOpen} onSelect={applyPreset} dense /> : null}
             <div className="ml-auto flex shrink-0 items-center justify-end gap-1">
                 {activeReferenceCount ? <ComposerPill theme={theme} borderColor={insetBorder} icon={<Boxes className="size-2.5" />} label={`已连接 ${activeReferenceCount} 个`} /> : null}
                 {!expanded && canExpandPrompt ? (
@@ -181,59 +185,87 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
         </div>
     );
 
-    const renderComposerControls = (expanded: boolean) => simpleMode ? (
-        <div className="flex min-w-0 items-center justify-between gap-2 p-1" style={{ background: controlsSurface }}>
-            <span className="min-w-0 truncate px-2 text-[var(--fs-tiny)]" style={{ color: theme.node.muted }}>
-                {activeReferenceCount ? `已连接 ${activeReferenceCount} 个素材` : "将使用默认模型与参数"}
-            </span>
-            <Button
-                type="text"
-                className="!inline-flex !h-8 shrink-0 !items-center !gap-1 !rounded-full !px-2.5 !text-[var(--fs-tiny)] !font-medium"
-                danger={isRunning}
-                disabled={isSubmitDisabled}
-                style={{ background: isSubmitDisabled ? theme.toolbar.itemHover : isRunning ? theme.accent.danger : monochromeAccent, color: isSubmitDisabled ? theme.node.faint : isRunning ? "#ffffff" : theme.canvas.background, boxShadow: isSubmitDisabled ? "none" : `0 8px 20px ${theme.spatial.shadow}, inset 0 1px 0 rgba(255,255,255,.18)` }}
-                onClick={() => (isRunning ? onStop(node.id) : expanded ? submitExpandedPrompt() : submit())}
-                aria-label={isRunning ? "停止生成" : "生成"}
-            >
-                {isRunning ? <Square className="size-2.5 fill-current" /> : <ArrowUp className="size-3" />}
-                {isRunning ? "停止" : "生成"}
-            </Button>
-        </div>
-    ) : (
-        <div className="flex min-w-0 items-center justify-between gap-0.5 p-1" style={{ background: controlsSurface }}>
-            <div className={`${expanded ? "max-w-[320px]" : mode === "image" || mode === "video" ? "max-w-[240px]" : "max-w-[174px]"} min-w-[104px] flex-1`}>
-                <ModelPicker className="!h-7 !w-full !min-w-0 !text-[var(--fs-tiny)] !font-normal [&_img]:!size-3 [&_.lucide]:!size-3" fullWidth config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability={mode} onMissingConfig={() => navigateToSettings({ continueCreation: true })} showSelectedPrice={false} />
-            </div>
-            <div className="ml-auto flex min-w-0 shrink-0 items-center gap-1">
-                {mode === "image" ? (
-                    <CanvasImageSettingsPopover
-                        config={config}
-                        placement={expanded ? "topRight" : "topLeft"}
-                        buttonClassName="!h-7 !w-[146px] !justify-start !rounded-full !border-0 !px-2.5 !text-[var(--fs-tiny)] !font-normal !shadow-none [&>span]:min-w-0 [&_.lucide]:!size-3"
-                        onConfigChange={(key, value) => onConfigChange(node.id, key === "count" ? { count: Number(value) || 1 } : { [key]: value })}
-                        onMissingConfig={() => navigateToSettings({ continueCreation: true })}
-                        onOpenChange={expanded ? undefined : onImageSettingsOpenChange}
-                    />
-                ) : mode === "video" ? (
-                    <CanvasVideoSettingsPopover config={config} buttonClassName="!h-7 !w-[144px] !justify-start !rounded-full !border-0 !px-2.5 !text-[var(--fs-tiny)] !font-normal !shadow-none [&>span]:min-w-0 [&_.lucide]:!size-3" onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))} />
-                ) : mode === "audio" ? (
-                    <CanvasAudioSettingsPopover config={config} buttonClassName="!h-7 !w-[146px] !justify-start !rounded-full !border-0 !px-2.5 !text-[var(--fs-tiny)] !font-normal !shadow-none [&>span]:min-w-0 [&_.lucide]:!size-3" onConfigChange={(key, value) => onConfigChange(node.id, audioConfigPatch(key, value))} />
-                ) : null}
-                <GenerationCostBadge credits={credits} theme={theme} />
+    const renderComposerControls = (expanded: boolean) =>
+        simpleMode ? (
+            <div className="flex min-w-0 items-center justify-between gap-2 p-1" style={{ background: controlsSurface }}>
+                <span className="min-w-0 truncate px-2 text-[var(--fs-tiny)]" style={{ color: theme.node.muted }}>
+                    {activeReferenceCount ? `已连接 ${activeReferenceCount} 个素材` : "将使用默认模型与参数"}
+                </span>
                 <Button
                     type="text"
-                    className="!inline-flex !h-8 !w-8 shrink-0 !items-center !justify-center !rounded-full !border !p-0 transition hover:!-translate-y-px hover:!brightness-110 motion-reduce:hover:!translate-y-0"
+                    className="!inline-flex !h-8 shrink-0 !items-center !gap-1 !rounded-full !px-2.5 !text-[var(--fs-tiny)] !font-medium"
                     danger={isRunning}
                     disabled={isSubmitDisabled}
-                    style={{ background: isSubmitDisabled ? theme.toolbar.itemHover : isRunning ? theme.accent.danger : monochromeAccent, borderColor: isSubmitDisabled ? insetBorder : monochromeAccent, color: isSubmitDisabled ? theme.node.faint : theme.canvas.background, boxShadow: isSubmitDisabled ? "none" : `0 8px 20px ${theme.spatial.shadow}, inset 0 1px 0 rgba(255,255,255,.18)` }}
+                    style={{
+                        background: isSubmitDisabled ? theme.toolbar.itemHover : isRunning ? theme.accent.danger : monochromeAccent,
+                        color: isSubmitDisabled ? theme.node.faint : isRunning ? "#ffffff" : theme.canvas.background,
+                        boxShadow: isSubmitDisabled ? "none" : `0 8px 20px ${theme.spatial.shadow}, inset 0 1px 0 rgba(255,255,255,.18)`,
+                    }}
                     onClick={() => (isRunning ? onStop(node.id) : expanded ? submitExpandedPrompt() : submit())}
                     aria-label={isRunning ? "停止生成" : "生成"}
                 >
                     {isRunning ? <Square className="size-2.5 fill-current" /> : <ArrowUp className="size-3" />}
+                    {isRunning ? "停止" : "生成"}
                 </Button>
             </div>
-        </div>
-    );
+        ) : (
+            <div className="flex min-w-0 items-center justify-between gap-0.5 p-1" style={{ background: controlsSurface }}>
+                <div className={`${expanded ? "max-w-[var(--panel-width-compact)]" : mode === "image" || mode === "video" ? "max-w-[240px]" : "max-w-[174px]"} min-w-[104px] flex-1`}>
+                    <ModelPicker
+                        className="!h-7 !w-full !min-w-0 !text-[var(--fs-tiny)] !font-normal [&_img]:!size-3 [&_.lucide]:!size-3"
+                        fullWidth
+                        config={config}
+                        value={config.model}
+                        onChange={(model) => onConfigChange(node.id, { model })}
+                        capability={mode}
+                        requirements={requirements}
+                        onMissingConfig={() => navigateToSettings({ continueCreation: true })}
+                        showSelectedPrice={false}
+                    />
+                </div>
+                <div className="ml-auto flex min-w-0 shrink-0 items-center gap-1">
+                    {mode === "image" ? (
+                        <CanvasImageSettingsPopover
+                            config={config}
+                            placement={expanded ? "topRight" : "topLeft"}
+                            buttonClassName="!h-7 !w-[146px] !justify-start !rounded-full !border-0 !px-2.5 !text-[var(--fs-tiny)] !font-normal !shadow-none [&>span]:min-w-0 [&_.lucide]:!size-3"
+                            onConfigChange={(key, value) => onConfigChange(node.id, key === "count" ? { count: Number(value) || 1 } : { [key]: value })}
+                            onMissingConfig={() => navigateToSettings({ continueCreation: true })}
+                            onOpenChange={expanded ? undefined : onImageSettingsOpenChange}
+                        />
+                    ) : mode === "video" ? (
+                        <CanvasVideoSettingsPopover
+                            config={config}
+                            buttonClassName="!h-7 !w-[144px] !justify-start !rounded-full !border-0 !px-2.5 !text-[var(--fs-tiny)] !font-normal !shadow-none [&>span]:min-w-0 [&_.lucide]:!size-3"
+                            onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))}
+                        />
+                    ) : mode === "audio" ? (
+                        <CanvasAudioSettingsPopover
+                            config={config}
+                            buttonClassName="!h-7 !w-[146px] !justify-start !rounded-full !border-0 !px-2.5 !text-[var(--fs-tiny)] !font-normal !shadow-none [&>span]:min-w-0 [&_.lucide]:!size-3"
+                            onConfigChange={(key, value) => onConfigChange(node.id, audioConfigPatch(key, value))}
+                        />
+                    ) : null}
+                    {creditsEnabled ? <GenerationCostBadge credits={credits} theme={theme} /> : null}
+                    <Button
+                        type="text"
+                        className="!inline-flex !h-8 !w-8 shrink-0 !items-center !justify-center !rounded-full !border !p-0 transition hover:!-translate-y-px hover:!brightness-110 motion-reduce:hover:!translate-y-0"
+                        danger={isRunning}
+                        disabled={isSubmitDisabled}
+                        style={{
+                            background: isSubmitDisabled ? theme.toolbar.itemHover : isRunning ? theme.accent.danger : monochromeAccent,
+                            borderColor: isSubmitDisabled ? insetBorder : monochromeAccent,
+                            color: isSubmitDisabled ? theme.node.faint : theme.canvas.background,
+                            boxShadow: isSubmitDisabled ? "none" : `0 8px 20px ${theme.spatial.shadow}, inset 0 1px 0 rgba(255,255,255,.18)`,
+                        }}
+                        onClick={() => (isRunning ? onStop(node.id) : expanded ? submitExpandedPrompt() : submit())}
+                        aria-label={isRunning ? "停止生成" : "生成"}
+                    >
+                        {isRunning ? <Square className="size-2.5 fill-current" /> : <ArrowUp className="size-3" />}
+                    </Button>
+                </div>
+            </div>
+        );
 
     return (
         <div
@@ -246,7 +278,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
             {renderComposerHeader(false)}
 
             <div
-                className="relative mt-2 flex max-h-36 flex-col overflow-hidden rounded-xl outline-none ring-0 transition-[height] duration-150 focus-within:outline-none focus-within:ring-0 motion-reduce:transition-none"
+                className="relative mt-2 flex max-h-[var(--prompt-panel-input-max-height)] flex-col overflow-hidden rounded-xl outline-none ring-0 transition-[height] duration-150 focus-within:outline-none focus-within:ring-0 motion-reduce:transition-none"
                 style={{ height: composerHeight, background: composerSurface, boxShadow: composerShadow }}
             >
                 <ConnectedReferenceShelf references={mentionReferences} theme={theme} onInsert={insertPromptReference} />
@@ -295,15 +327,18 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                 centered
                 width={760}
                 destroyOnHidden
-                onCancel={() => { setExpandedPresetOpen(false); setExpandedPromptOpen(false); }}
-                styles={{ container: { display: "flex", height: "min(440px, calc(100vh - 40px))", flexDirection: "column", borderRadius: 12, border: `1px solid ${shellBorder}`, padding: 0, overflow: "hidden", background: shellSurface, boxShadow: modalShadow }, body: { minHeight: 0, flex: 1, padding: 0 } }}
+                onCancel={() => {
+                    setExpandedPresetOpen(false);
+                    setExpandedPromptOpen(false);
+                }}
+                styles={{
+                    container: { display: "flex", height: "min(440px, calc(100vh - 40px))", flexDirection: "column", borderRadius: 12, border: `1px solid ${shellBorder}`, padding: 0, overflow: "hidden", background: shellSurface, boxShadow: modalShadow },
+                    body: { minHeight: 0, flex: 1, padding: 0 },
+                }}
             >
                 <div className="flex h-full min-h-0 flex-col gap-2.5 p-3" style={{ color: theme.node.text }}>
                     <div className="shrink-0 pr-8">{renderComposerHeader(true)}</div>
-                    <div
-                        className="flex min-h-[240px] flex-1 flex-col overflow-hidden rounded-xl outline-none ring-0 focus-within:outline-none focus-within:ring-0"
-                        style={{ background: composerSurface, boxShadow: composerShadow }}
-                    >
+                    <div className="flex min-h-[240px] flex-1 flex-col overflow-hidden rounded-xl outline-none ring-0 focus-within:outline-none focus-within:ring-0" style={{ background: composerSurface, boxShadow: composerShadow }}>
                         <ConnectedReferenceShelf references={mentionReferences} theme={theme} onInsert={insertPromptReference} />
                         <CanvasResourceMentionTextarea
                             value={prompt}
@@ -330,10 +365,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
 
 function ComposerPill({ theme, borderColor, icon, label }: { theme: CanvasTheme; borderColor: string; icon: ReactNode; label: string }) {
     return (
-        <span
-            className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border px-1.5 text-[var(--fs-micro)] font-medium transition hover:brightness-125"
-            style={{ background: theme.canvas.background, borderColor, color: theme.node.activeStroke }}
-        >
+        <span className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border px-1.5 text-[var(--fs-micro)] font-medium transition hover:brightness-125" style={{ background: theme.canvas.background, borderColor, color: theme.node.activeStroke }}>
             {icon}
             {label}
         </span>
@@ -356,28 +388,71 @@ function modeDisplayName(mode: CanvasNodeGenerationMode) {
 
 function ConnectedReferenceShelf({ references, theme, onInsert }: { references: CanvasResourceReference[]; theme: CanvasTheme; onInsert: (reference: CanvasResourceReference) => void }) {
     const activeReferences = references.filter((item) => item.active && item.kind !== "skill");
+    const [imagePreview, setImagePreview] = useState<CanvasResourceReference | null>(null);
     if (!activeReferences.length) return null;
 
     return (
-        <div className="thin-scrollbar flex h-[42px] shrink-0 min-w-0 items-center gap-1.5 overflow-x-auto px-2.5 pt-1.5" role="group" aria-label="已连接素材">
-            {activeReferences.map((reference, index) => (
-                <button
-                    key={reference.id}
-                    type="button"
-                    className="group relative size-[34px] shrink-0 overflow-hidden rounded-md text-left transition hover:-translate-y-0.5 hover:brightness-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 motion-reduce:hover:translate-y-0"
-                    style={{ background: theme.toolbar.itemHover, color: theme.node.text, outlineColor: theme.node.activeStroke, boxShadow: `0 4px 14px ${theme.spatial.shadow}` }}
-                    title={`插入 @${reference.label}`}
-                    aria-label={`插入 @${reference.label}`}
-                    onClick={() => onInsert(reference)}
-                >
-                    <span className="block size-full overflow-hidden rounded-md">
-                        <ReferenceThumbnail reference={reference} />
-                    </span>
-                    <span className="absolute left-0.5 top-0.5 grid size-3.5 place-items-center rounded-full bg-black/65 text-[var(--fs-micro)] font-semibold text-white backdrop-blur-sm">{index + 1}</span>
-                    <span className="absolute bottom-0.5 right-0.5 grid size-3.5 place-items-center rounded-full bg-black/65 text-white backdrop-blur-sm"><AtSign className="size-2" /></span>
-                </button>
-            ))}
-        </div>
+        <>
+            <div className="thin-scrollbar flex h-[42px] shrink-0 min-w-0 items-center gap-1.5 overflow-x-auto px-2.5 pt-1.5" role="group" aria-label="已连接素材">
+                {activeReferences.map((reference, index) => {
+                    const canPreview = (reference.kind === "image" || reference.kind === "character") && Boolean(reference.previewUrl);
+                    return (
+                        <span key={reference.id} className="relative size-[34px] shrink-0">
+                            <button
+                                type="button"
+                                className={`group relative size-full overflow-hidden rounded-md text-left transition hover:-translate-y-0.5 hover:brightness-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 motion-reduce:hover:translate-y-0${canPreview ? " cursor-zoom-in" : ""}`}
+                                style={{ background: theme.toolbar.itemHover, color: theme.node.text, outlineColor: theme.node.activeStroke, boxShadow: `0 4px 14px ${theme.spatial.shadow}` }}
+                                title={canPreview ? `预览 ${reference.title}` : `插入 @${reference.label}`}
+                                aria-label={canPreview ? `预览 ${reference.title}` : `插入 @${reference.label}`}
+                                onClick={() => (canPreview ? setImagePreview(reference) : onInsert(reference))}
+                            >
+                                <span className="block size-full overflow-hidden rounded-md">
+                                    <ReferenceThumbnail reference={reference} />
+                                </span>
+                                <span className="absolute left-0.5 top-0.5 grid size-3.5 place-items-center rounded-full bg-black/65 text-[var(--fs-micro)] font-semibold text-white backdrop-blur-sm">{index + 1}</span>
+                                {canPreview ? (
+                                    <span className="absolute bottom-0.5 left-0.5 grid size-3.5 place-items-center rounded-full bg-black/65 text-white backdrop-blur-sm">
+                                        <Maximize2 className="size-2" />
+                                    </span>
+                                ) : null}
+                                {!canPreview ? (
+                                    <span className="absolute bottom-0.5 right-0.5 grid size-3.5 place-items-center rounded-full bg-black/65 text-white backdrop-blur-sm">
+                                        <AtSign className="size-2" />
+                                    </span>
+                                ) : null}
+                            </button>
+                            {canPreview ? (
+                                <button
+                                    type="button"
+                                    className="absolute bottom-0.5 right-0.5 grid size-3.5 place-items-center rounded-full bg-black/65 text-white backdrop-blur-sm transition hover:bg-black/85 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1"
+                                    style={{ outlineColor: theme.node.activeStroke }}
+                                    title={`插入 @${reference.label}`}
+                                    aria-label={`插入 @${reference.label}`}
+                                    onClick={() => onInsert(reference)}
+                                >
+                                    <AtSign className="size-2" />
+                                </button>
+                            ) : null}
+                        </span>
+                    );
+                })}
+            </div>
+            {imagePreview?.previewUrl ? (
+                <AntImage
+                    src={imagePreview.previewUrl}
+                    alt={imagePreview.title || imagePreview.label}
+                    style={{ display: "none" }}
+                    preview={{
+                        open: true,
+                        movable: true,
+                        minScale: 0.5,
+                        maxScale: 12,
+                        scaleStep: 0.25,
+                        onOpenChange: (open) => !open && setImagePreview(null),
+                    }}
+                />
+            ) : null}
+        </>
     );
 }
 
@@ -397,7 +472,12 @@ function ReferenceThumbnail({ reference }: { reference: CanvasResourceReference 
 function GenerationCostBadge({ credits, theme }: { credits: number | null; theme: CanvasTheme }) {
     if (credits === null) return null;
     return (
-        <span className="canvas-generation-cost-badge inline-flex h-7 shrink-0 items-center gap-1 rounded-full px-2 text-[var(--fs-micro)] font-semibold tabular-nums" style={{ background: theme.accent.primarySoft, color: theme.accent.primary }} title={`预计消耗 ${credits.toLocaleString()} 积分`} aria-label={`预计消耗 ${credits.toLocaleString()} 积分`}>
+        <span
+            className="canvas-generation-cost-badge inline-flex h-7 shrink-0 items-center gap-1 rounded-full px-2 text-[var(--fs-micro)] font-semibold tabular-nums"
+            style={{ background: theme.accent.primarySoft, color: theme.accent.primary }}
+            title={`预计消耗 ${credits.toLocaleString()} 积分`}
+            aria-label={`预计消耗 ${credits.toLocaleString()} 积分`}
+        >
             <CreditSymbol className="text-[var(--fs-label)]" />
             {credits.toLocaleString()}
         </span>
@@ -408,11 +488,11 @@ function defaultMode(type: CanvasNodeData["type"]): CanvasNodeGenerationMode {
     return type === CanvasNodeType.Text || type === CanvasNodeType.Skill ? "text" : type === CanvasNodeType.Video ? "video" : type === CanvasNodeType.Audio ? "audio" : "image";
 }
 
-function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: CanvasNodeGenerationMode): AiConfig {
+function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: CanvasNodeGenerationMode, requirements: ModelRequirements): AiConfig {
     const defaultModel = mode === "image" ? globalConfig.imageModel : mode === "video" ? globalConfig.videoModel : mode === "audio" ? globalConfig.audioModel : globalConfig.textModel;
     const fallbackModel = mode === "image" ? defaultConfig.imageModel : mode === "video" ? defaultConfig.videoModel : mode === "audio" ? defaultConfig.audioModel : defaultConfig.textModel;
-    const storedModel = node.metadata?.model;
-    const model = storedModel && configuredModelMatchesCapability(globalConfig, storedModel, mode) ? storedModel : defaultModel && configuredModelMatchesCapability(globalConfig, defaultModel, mode) ? defaultModel : fallbackModel;
+    const preferredModel = resolveCanvasGenerationModel(globalConfig, node.metadata?.model, mode) || resolveCanvasGenerationModel(globalConfig, defaultModel, mode) || fallbackModel;
+    const model = resolveCompatibleModel(globalConfig, preferredModel, requirements) || preferredModel;
     return {
         ...globalConfig,
         model,

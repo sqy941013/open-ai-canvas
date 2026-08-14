@@ -1,4 +1,6 @@
 import type { PortraitTextureSettings } from "@/lib/canvas/canvas-portrait-texture";
+import type { StyleExecutionPlan } from "@/lib/canvas/style-profile";
+import type { SrtEntry, SubtitleHighlight, SubtitleStyle } from "@/types/timeline";
 
 export type Position = {
     x: number;
@@ -29,19 +31,22 @@ export type CanvasWorkspaceMode = "simple" | "professional";
 export type CanvasToolMode = "move" | "box-select";
 export type StoryboardShotDuration = "auto" | "5" | "10" | "15" | "30";
 export type StoryboardShotCount = "auto" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10";
+export type StoryboardVideoInputMode = "direct" | "keyframe";
 export type CanvasGenerationMode = "text" | "image" | "video" | "audio";
 export type CanvasGenerationBatchMode = "storyboard_image" | "storyboard_video" | "action_board";
 export type CanvasGenerationBatchStatus = "queued" | "running" | "partial_failed" | "completed" | "cancelled";
 export type CanvasGenerationBatchItemStatus = "waiting" | "submitting" | "queued" | "running" | "succeeded" | "failed" | "cancelled";
 export type CanvasImageGenerationType = "generation" | "edit";
-export type CanvasWorkflowKind = "free" | "script" | "story_input" | "character" | "scene" | "storyboard" | "shot" | "final" | "styleboard" | "reference_set" | "action_board";
+export type CanvasWorkflowKind = "free" | "script" | "story_input" | "character" | "scene" | "storyboard" | "shot" | "final" | "styleboard" | "reference_set" | "reference_video" | "action_board";
 export type CanvasVideoEditOperation = "text_to_video" | "image_to_video" | "extend" | "inpaint" | "replace_element" | "camera_motion" | "style_transfer" | "audio_to_video" | "compare_versions" | "concat";
 export type CanvasSkillCategory = "writing" | "storyboard" | "image" | "video" | "utility";
 export type CanvasSkillOutputMode = "text" | "json" | "image_prompt" | "workflow";
-export type StoryboardColumn = "shotNumber" | "durationSeconds" | "plotDescription" | "dialogue" | "shotSize" | "emotion" | "lightingAndAtmosphere" | "audioEffects" | "camera" | "motion" | "timeBeats" | "imageGenerationPrompt" | "videoMotionPrompt" | "negativePrompt";
+export type StoryboardColumn = "shotNumber" | "durationSeconds" | "plotDescription" | "dialogue" | "narrativeIntent" | "viewerPOV" | "performanceBlocking" | "shotSize" | "emotion" | "lightingAndAtmosphere" | "audioEffects" | "camera" | "motion" | "timeBeats" | "imageGenerationPrompt" | "videoMotionPrompt" | "continuityOut" | "negativePrompt";
 
 export type StoryboardCharacterReference = {
     characterName: string;
+    characterAssetId?: string;
+    characterVersionId?: string;
     characterDescription?: string;
     characterImageNodeId?: string;
 };
@@ -53,6 +58,9 @@ export type StoryboardRow = {
     plotDescription: string;
     dialogue: string;
     characters: StoryboardCharacterReference[];
+    narrativeIntent: string;
+    viewerPOV: string;
+    performanceBlocking: string;
     shotSize: string;
     emotion: string;
     lightingAndAtmosphere: string;
@@ -62,6 +70,11 @@ export type StoryboardRow = {
     timeBeats: string;
     imageGenerationPrompt: string;
     videoMotionPrompt: string;
+    imagePromptTemplateVariables?: Record<string, string>;
+    videoPromptTemplateVariables?: Record<string, string>;
+    mustHave: string[];
+    optionalDetails: string[];
+    continuityOut: string;
     negativePrompt: string;
     referenceNodeIds: string[];
     imageNodeId?: string;
@@ -115,6 +128,8 @@ export type CanvasNodeMetadata = {
     richText?: Record<string, unknown>;
     composerContent?: string;
     prompt?: string;
+    promptTemplateOperation?: string;
+    promptTemplateVariables?: Record<string, string>;
     status?: CanvasNodeStatus;
     locked?: boolean;
     errorDetails?: string;
@@ -157,6 +172,8 @@ export type CanvasNodeMetadata = {
     workflowTitle?: string;
     workflowDescription?: string;
     stylePresetId?: string;
+    styleProfileJson?: string;
+    styleExecutionPlan?: StyleExecutionPlan;
     chapterId?: string;
     chapterTitle?: string;
     shotIndex?: number;
@@ -211,12 +228,18 @@ export type CanvasNodeMetadata = {
     directorPreviewNodeId?: string;
     directorDepthNodeId?: string;
     directorNormalNodeId?: string;
+    directorClayVideoNodeId?: string;
+    subtitleEntries?: SrtEntry[];
+    subtitleHighlights?: SubtitleHighlight[];
+    subtitleStyle?: SubtitleStyle;
+    subtitleUpdatedAt?: string;
     skillId?: string;
     skillVersion?: number;
     skillSnapshot?: CanvasSkillSnapshot;
     storyboard?: StoryboardData;
     storyboardShotDuration?: StoryboardShotDuration;
     storyboardShotCount?: StoryboardShotCount;
+    storyboardVideoInputMode?: StoryboardVideoInputMode;
     storyboardComposerHeight?: number;
     generationBatches?: CanvasGenerationBatch[];
     frame?: {

@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -40,13 +41,15 @@ const taskWorkerConcurrency = 3
 const taskLogPayloadLimit = 4000
 
 type CreateSessionRequest struct {
-	ProjectID      string            `json:"projectId"`
-	Prompt         string            `json:"prompt"`
-	CanvasSnapshot map[string]any    `json:"canvasSnapshot"`
-	References     []string          `json:"references"`
-	Requirements   string            `json:"requirements"`
-	CanvasAssets   []storyboardAsset `json:"canvasAssets"`
-	Config         providerConfig    `json:"config"`
+	ProjectID      string                    `json:"projectId"`
+	Prompt         string                    `json:"prompt"`
+	CanvasSnapshot map[string]any            `json:"canvasSnapshot"`
+	References     []string                  `json:"references"`
+	Requirements   string                    `json:"requirements"`
+	CanvasAssets   []storyboardAsset         `json:"canvasAssets"`
+	ProjectStyle   storyboardProjectStyle    `json:"projectStyle"`
+	Characters     []storyboardCharacterCard `json:"characters"`
+	Config         providerConfig            `json:"config"`
 }
 
 type CreateTaskRequest struct {
@@ -68,28 +71,33 @@ type SessionDetail struct {
 }
 
 type TaskSummary struct {
-	ID                string              `json:"id"`
-	SessionID         string              `json:"sessionId,omitempty"`
-	ProjectID         string              `json:"projectId,omitempty"`
-	Type              string              `json:"type"`
-	Status            model.TaskStatus    `json:"status"`
-	Stage             string              `json:"stage"`
-	Progress          int                 `json:"progress"`
-	Prompt            string              `json:"prompt"`
-	Operation         string              `json:"operation,omitempty"`
-	Provider          string              `json:"provider,omitempty"`
-	Model             string              `json:"model,omitempty"`
-	ProviderRequestID string              `json:"providerRequestId,omitempty"`
-	ErrorCode         string              `json:"errorCode,omitempty"`
-	PreviewURL        string              `json:"previewUrl,omitempty"`
-	PreviewKind       string              `json:"previewKind,omitempty"`
-	Attempts          int                 `json:"attempts"`
-	StartedAt         *time.Time          `json:"startedAt"`
-	CompletedAt       *time.Time          `json:"completedAt"`
-	CreatedAt         time.Time           `json:"createdAt"`
-	UpdatedAt         time.Time           `json:"updatedAt"`
-	Billing           *TaskBillingSummary `json:"billing,omitempty"`
-	ClientContext     *TaskClientContext  `json:"clientContext,omitempty"`
+	ID                        string                     `json:"id"`
+	SessionID                 string                     `json:"sessionId,omitempty"`
+	ProjectID                 string                     `json:"projectId,omitempty"`
+	Type                      string                     `json:"type"`
+	Status                    model.TaskStatus           `json:"status"`
+	Stage                     string                     `json:"stage"`
+	Progress                  int                        `json:"progress"`
+	Prompt                    string                     `json:"prompt"`
+	Operation                 string                     `json:"operation,omitempty"`
+	Provider                  string                     `json:"provider,omitempty"`
+	Model                     string                     `json:"model,omitempty"`
+	ProviderRequestID         string                     `json:"providerRequestId,omitempty"`
+	ProviderCancelStatus      model.ProviderCancelStatus `json:"providerCancelStatus,omitempty"`
+	ProviderCancelError       string                     `json:"providerCancelError,omitempty"`
+	ProviderCancelAttempts    int                        `json:"providerCancelAttempts,omitempty"`
+	ProviderCancelRequestedAt *time.Time                 `json:"providerCancelRequestedAt,omitempty"`
+	ProviderCancelledAt       *time.Time                 `json:"providerCancelledAt,omitempty"`
+	ErrorCode                 string                     `json:"errorCode,omitempty"`
+	PreviewURL                string                     `json:"previewUrl,omitempty"`
+	PreviewKind               string                     `json:"previewKind,omitempty"`
+	Attempts                  int                        `json:"attempts"`
+	StartedAt                 *time.Time                 `json:"startedAt"`
+	CompletedAt               *time.Time                 `json:"completedAt"`
+	CreatedAt                 time.Time                  `json:"createdAt"`
+	UpdatedAt                 time.Time                  `json:"updatedAt"`
+	Billing                   *TaskBillingSummary        `json:"billing,omitempty"`
+	ClientContext             *TaskClientContext         `json:"clientContext,omitempty"`
 }
 
 type TaskClientContext struct {
@@ -111,21 +119,39 @@ type TaskListOptions struct {
 }
 
 type agentStoryboardInput struct {
-	References     []string          `json:"references"`
-	CanvasSnapshot map[string]any    `json:"canvasSnapshot"`
-	Requirements   string            `json:"requirements"`
-	CanvasAssets   []storyboardAsset `json:"canvasAssets"`
-	Config         providerConfig    `json:"config"`
-	ShotDuration   int               `json:"shotDurationSeconds"`
-	ShotCount      int               `json:"shotCount"`
+	References     []string                  `json:"references"`
+	CanvasSnapshot map[string]any            `json:"canvasSnapshot"`
+	Requirements   string                    `json:"requirements"`
+	CanvasAssets   []storyboardAsset         `json:"canvasAssets"`
+	ProjectStyle   storyboardProjectStyle    `json:"projectStyle"`
+	Characters     []storyboardCharacterCard `json:"characters"`
+	Config         providerConfig            `json:"config"`
+	ShotDuration   int                       `json:"shotDurationSeconds"`
+	ShotCount      int                       `json:"shotCount"`
+}
+
+type storyboardProjectStyle struct {
+	PresetID    string `json:"presetId"`
+	Title       string `json:"title"`
+	Prompt      string `json:"prompt"`
+	ProfileJSON string `json:"profileJson,omitempty"`
+}
+
+type storyboardCharacterCard struct {
+	AssetID    string         `json:"assetId"`
+	VersionID  string         `json:"versionId"`
+	Name       string         `json:"name"`
+	Definition map[string]any `json:"definition"`
 }
 
 type storyboardAsset struct {
-	ID     string   `json:"id"`
-	Title  string   `json:"title"`
-	Type   string   `json:"type"`
-	Tags   []string `json:"tags"`
-	Prompt string   `json:"prompt"`
+	ID                 string   `json:"id"`
+	Title              string   `json:"title"`
+	Type               string   `json:"type"`
+	Tags               []string `json:"tags"`
+	Prompt             string   `json:"prompt"`
+	CharacterAssetID   string   `json:"characterAssetId,omitempty"`
+	CharacterVersionID string   `json:"characterVersionId,omitempty"`
 }
 
 type agentStoryboardPlan struct {
@@ -139,21 +165,28 @@ type agentStoryboardPlan struct {
 }
 
 type agentStoryboardShot struct {
-	Title        string   `json:"title"`
-	Description  string   `json:"description"`
-	Duration     int      `json:"durationSeconds"`
-	Dialogue     string   `json:"dialogue"`
-	ShotSize     string   `json:"shotSize"`
-	Emotion      string   `json:"emotion"`
-	Lighting     string   `json:"lightingAndAtmosphere"`
-	AudioEffects string   `json:"audioEffects"`
-	VisualPrompt string   `json:"visualPrompt"`
-	VideoPrompt  string   `json:"videoPrompt"`
-	Camera       string   `json:"camera"`
-	Motion       string   `json:"motion"`
-	TimeBeats    string   `json:"timeBeats"`
-	Negative     string   `json:"negativePrompt"`
-	AssetTags    []string `json:"assetTags"`
+	Title         string   `json:"title"`
+	Description   string   `json:"description"`
+	Duration      int      `json:"durationSeconds"`
+	Dialogue      string   `json:"dialogue"`
+	ShotSize      string   `json:"shotSize"`
+	Emotion       string   `json:"emotion"`
+	Lighting      string   `json:"lightingAndAtmosphere"`
+	AudioEffects  string   `json:"audioEffects"`
+	VisualPrompt  string   `json:"visualPrompt"`
+	VideoPrompt   string   `json:"videoPrompt"`
+	Camera        string   `json:"camera"`
+	Motion        string   `json:"motion"`
+	TimeBeats     string   `json:"timeBeats"`
+	Negative      string   `json:"negativePrompt"`
+	AssetTags     []string `json:"assetTags"`
+	CharacterIDs  []string `json:"characterIds"`
+	Intent        string   `json:"narrativeIntent"`
+	ViewerPOV     string   `json:"viewerPOV"`
+	Performance   string   `json:"performanceBlocking"`
+	MustHave      []string `json:"mustHave"`
+	Optional      []string `json:"optionalDetails"`
+	ContinuityOut string   `json:"continuityOut"`
 }
 
 func New(repo *repository.Repository, dataDir string) *Service {
@@ -162,6 +195,9 @@ func New(repo *repository.Repository, dataDir string) *Service {
 }
 
 func (s *Service) StartWorker() {
+	s.startTextReplayCleanup()
+	s.startProviderCancellationReconciliation()
+	s.startBillingReviewAudit()
 	go func() {
 		slots := make(chan struct{}, maxChannelConcurrencyLimit)
 		dispatch := func() {
@@ -202,6 +238,9 @@ func (s *Service) CreateSession(userID string, req CreateSessionRequest) (*Sessi
 	if prompt == "" {
 		return nil, errors.New("prompt is required")
 	}
+	if err := validateStoryboardContext(req.ProjectStyle, req.Characters); err != nil {
+		return nil, err
+	}
 	compactedSnapshot := compactPersistedValue(req.CanvasSnapshot)
 	snapshotJSON, _ := json.Marshal(compactedSnapshot)
 	session := model.Session{ID: newID(), UserID: userID, ProjectID: req.ProjectID, Status: model.SessionStatusActive, Prompt: prompt, CanvasSnapshotJSON: string(snapshotJSON)}
@@ -233,7 +272,7 @@ func (s *Service) CreateSession(userID string, req CreateSessionRequest) (*Sessi
 		return nil, err
 	}
 	s.storageMu.Unlock()
-	taskReq := CreateTaskRequest{SessionID: session.ID, ProjectID: req.ProjectID, Type: "agent_storyboard", Operation: "storyboard", Prompt: prompt, Provider: "openai-compatible", Model: req.Config.Model, Input: map[string]any{"references": req.References, "canvasSnapshot": compactedSnapshot, "requirements": req.Requirements, "canvasAssets": req.CanvasAssets, "config": req.Config}}
+	taskReq := CreateTaskRequest{SessionID: session.ID, ProjectID: req.ProjectID, Type: "agent_storyboard", Operation: "storyboard", Prompt: prompt, Provider: "openai-compatible", Model: req.Config.Model, Input: map[string]any{"references": req.References, "canvasSnapshot": compactedSnapshot, "requirements": req.Requirements, "canvasAssets": req.CanvasAssets, "projectStyle": req.ProjectStyle, "characters": req.Characters, "config": req.Config}}
 	if _, err := s.CreateTask(userID, taskReq); err != nil {
 		s.storageMu.Lock()
 		cleanupErr := s.repo.DeleteSessionDraft(userID, session.ID)
@@ -281,6 +320,9 @@ func (s *Service) CreateTask(userID string, req CreateTaskRequest) (*model.Task,
 	}
 	normalizedInput, err := normalizeTaskInput(req.Input)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.ValidateTaskCapability(normalizedInput); err != nil {
 		return nil, err
 	}
 	if containsInlineMediaDataURL(normalizedInput) {
@@ -429,6 +471,12 @@ func (s *Service) refreshTaskProviderState(task *model.Task) error {
 	}
 	task.PollStage = latest.PollStage
 	task.NextPollAt = latest.NextPollAt
+	task.ProviderCancelStatus = latest.ProviderCancelStatus
+	task.ProviderCancelError = latest.ProviderCancelError
+	task.ProviderCancelAttempts = latest.ProviderCancelAttempts
+	task.ProviderCancelRequestedAt = latest.ProviderCancelRequestedAt
+	task.ProviderCancelledAt = latest.ProviderCancelledAt
+	task.ProviderCancelNextCheckAt = latest.ProviderCancelNextCheckAt
 	return nil
 }
 
@@ -439,6 +487,9 @@ func (s *Service) RetryTask(userID string, id string) (*model.Task, error) {
 	}
 	if task.Status != model.TaskStatusFailed && task.Status != model.TaskStatusCancelled {
 		return nil, errors.New("only failed or cancelled tasks can be retried")
+	}
+	if task.ProviderCancelStatus == model.ProviderCancelStatusRequested {
+		return nil, BadAuthRequest("上游取消状态仍在确认中，请确认费用结果后再重试")
 	}
 	if isContentModerationFailure(task.Error) {
 		return nil, BadAuthRequest(contentModerationRetryMessage)
@@ -486,7 +537,7 @@ func (s *Service) RetryTask(userID string, id string) (*model.Task, error) {
 	return taskForOutput(*task), nil
 }
 
-func (s *Service) CancelTask(userID string, id string) (*model.Task, error) {
+func (s *Service) CancelTask(ctx context.Context, userID string, id string) (*model.Task, error) {
 	task, err := s.repo.TaskForUser(userID, id)
 	if err != nil {
 		return nil, err
@@ -495,6 +546,7 @@ func (s *Service) CancelTask(userID string, id string) (*model.Task, error) {
 		return nil, errors.New("completed task cannot be cancelled")
 	}
 	now := time.Now()
+	cancelledRunningTask := false
 	if task.Status == model.TaskStatusQueued {
 		cancelled, err := s.repo.CancelTaskIfStatus(userID, task.ID, model.TaskStatusQueued, now)
 		if err != nil {
@@ -516,7 +568,6 @@ func (s *Service) CancelTask(userID string, id string) (*model.Task, error) {
 		}
 	}
 	if task.Status == model.TaskStatusRunning {
-		s.cancelActiveTask(task.ID)
 		cancelled, err := s.repo.CancelTaskIfStatus(userID, task.ID, model.TaskStatusRunning, now)
 		if err != nil {
 			return nil, err
@@ -531,6 +582,8 @@ func (s *Service) CancelTask(userID string, id string) (*model.Task, error) {
 			}
 			task = latest
 		} else {
+			cancelledRunningTask = true
+			s.cancelActiveTask(task.ID)
 			if err := s.MarkBillingUncertain(task.BillingOrderID, "运行中的上游请求被用户取消，费用状态待核对"); err != nil {
 				return nil, err
 			}
@@ -545,6 +598,18 @@ func (s *Service) CancelTask(userID string, id string) (*model.Task, error) {
 	}
 	if task.SessionID != "" {
 		_ = s.markSessionFailed(*task, "会话任务已取消。")
+	}
+	if cancelledRunningTask {
+		if err := s.requestProviderCancellation(ctx, task); err != nil {
+			return nil, err
+		}
+		task, err = s.repo.TaskForUser(userID, id)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := s.finalizeTaskTextReplay(task.ID, model.TaskStatusCancelled); err != nil {
+		_ = s.log(userID, task.ID, "error", "文本回放草稿归并失败", err.Error())
 	}
 	_ = s.log(userID, task.ID, "warn", "任务已取消", "")
 	return taskForOutput(*task), nil
@@ -596,27 +661,32 @@ func taskSummaryForOutput(task model.Task) TaskSummary {
 	}
 	previewURL, previewKind := taskMediaPreview(task.ResultJSON, task.Type)
 	return TaskSummary{
-		ID:                task.ID,
-		SessionID:         task.SessionID,
-		ProjectID:         task.ProjectID,
-		Type:              task.Type,
-		Status:            task.Status,
-		Stage:             task.Stage,
-		Progress:          task.Progress,
-		Prompt:            truncateRunes(task.Prompt, 500),
-		Operation:         task.Operation,
-		Provider:          task.Provider,
-		Model:             task.Model,
-		ProviderRequestID: task.ProviderRequestID,
-		ErrorCode:         errorCode,
-		PreviewURL:        previewURL,
-		PreviewKind:       previewKind,
-		Attempts:          task.Attempts,
-		StartedAt:         task.StartedAt,
-		CompletedAt:       task.CompletedAt,
-		CreatedAt:         task.CreatedAt,
-		UpdatedAt:         task.UpdatedAt,
-		ClientContext:     taskClientContext(task.InputJSON),
+		ID:                        task.ID,
+		SessionID:                 task.SessionID,
+		ProjectID:                 task.ProjectID,
+		Type:                      task.Type,
+		Status:                    task.Status,
+		Stage:                     task.Stage,
+		Progress:                  task.Progress,
+		Prompt:                    truncateRunes(task.Prompt, 500),
+		Operation:                 task.Operation,
+		Provider:                  task.Provider,
+		Model:                     task.Model,
+		ProviderRequestID:         task.ProviderRequestID,
+		ProviderCancelStatus:      task.ProviderCancelStatus,
+		ProviderCancelError:       task.ProviderCancelError,
+		ProviderCancelAttempts:    task.ProviderCancelAttempts,
+		ProviderCancelRequestedAt: task.ProviderCancelRequestedAt,
+		ProviderCancelledAt:       task.ProviderCancelledAt,
+		ErrorCode:                 errorCode,
+		PreviewURL:                previewURL,
+		PreviewKind:               previewKind,
+		Attempts:                  task.Attempts,
+		StartedAt:                 task.StartedAt,
+		CompletedAt:               task.CompletedAt,
+		CreatedAt:                 task.CreatedAt,
+		UpdatedAt:                 task.UpdatedAt,
+		ClientContext:             taskClientContext(task.InputJSON),
 	}
 }
 
@@ -843,7 +913,7 @@ func (s *Service) processClaimedTask(task *model.Task) error {
 		task.Stage = "计费准备失败"
 		task.Error = taskFailureMessage(err)
 		task.CompletedAt = ptr(time.Now())
-		_ = s.repo.Save(task)
+		_, _ = s.repo.UpdateTaskTerminalState(task.ID, model.TaskStatusRunning, task.Status, task.Stage, task.Error, *task.CompletedAt)
 		_ = s.RefundBilling(task.BillingOrderID, "计费准备失败，上游请求未发出")
 		return err
 	}
@@ -874,13 +944,16 @@ func (s *Service) processClaimedTask(task *model.Task) error {
 			task.Stage = "任务已取消"
 			task.Error = "任务已取消"
 			task.CompletedAt = ptr(time.Now())
-			_ = s.repo.Save(task)
+			_, _ = s.repo.UpdateTaskTerminalState(task.ID, model.TaskStatusRunning, task.Status, task.Stage, task.Error, *task.CompletedAt)
 			if channelSlotFailedBeforeRequest {
 				_ = s.RefundBilling(task.BillingOrderID, "等待渠道槽位期间取消，上游请求未发出")
 			} else {
 				_ = s.MarkBillingUncertain(task.BillingOrderID, "任务取消时上游费用状态不明确")
 			}
 			_ = s.markSessionFailed(*task, "会话任务已取消。")
+			if compactErr := s.finalizeTaskTextReplay(task.ID, model.TaskStatusCancelled); compactErr != nil {
+				_ = s.log(task.UserID, task.ID, "error", "文本回放草稿归并失败", compactErr.Error())
+			}
 			_ = s.log(task.UserID, task.ID, "warn", "任务已取消", "")
 			return nil
 		}
@@ -891,7 +964,10 @@ func (s *Service) processClaimedTask(task *model.Task) error {
 		task.Stage = "任务失败"
 		task.Error = taskFailureMessage(err)
 		task.CompletedAt = ptr(time.Now())
-		_ = s.repo.Save(task)
+		_, _ = s.repo.UpdateTaskTerminalState(task.ID, model.TaskStatusRunning, task.Status, task.Stage, task.Error, *task.CompletedAt)
+		if compactErr := s.finalizeTaskTextReplay(task.ID, model.TaskStatusFailed); compactErr != nil {
+			_ = s.log(task.UserID, task.ID, "error", "文本回放草稿归并失败", compactErr.Error())
+		}
 		if providerSucceeded || (!channelSlotFailedBeforeRequest && s.BillingFailureRequiresReview(task.BillingOrderID, task.ID, err)) {
 			_ = s.MarkBillingUncertain(task.BillingOrderID, task.Error)
 		} else {
@@ -906,6 +982,9 @@ func (s *Service) processClaimedTask(task *model.Task) error {
 		return err
 	}
 	if latest.Status == model.TaskStatusCancelled {
+		if compactErr := s.finalizeTaskTextReplay(task.ID, model.TaskStatusCancelled); compactErr != nil {
+			_ = s.log(task.UserID, task.ID, "error", "文本回放草稿归并失败", compactErr.Error())
+		}
 		_ = s.MarkBillingUncertain(task.BillingOrderID, "上游已返回结果，但任务被取消")
 		_ = s.markSessionFailed(*latest, "会话任务已取消。")
 		_ = s.log(task.UserID, task.ID, "warn", "任务已取消，丢弃生成结果", "")
@@ -917,15 +996,30 @@ func (s *Service) processClaimedTask(task *model.Task) error {
 	task.Progress = 90
 	_ = s.repo.UpdateTaskProgress(task.ID, task.Stage, task.Progress)
 	if err := s.saveTaskCompletionWithinStorageQuota(task, resultJSON, opsJSON, len(canvasOps) > 0); err != nil {
+		if errors.Is(err, repository.ErrTaskStateConflict) {
+			latest, latestErr := s.repo.Task(task.ID)
+			if latestErr == nil && latest.Status == model.TaskStatusCancelled {
+				_ = s.MarkBillingUncertain(task.BillingOrderID, "上游已返回结果，但任务被取消")
+				_ = s.markSessionFailed(*latest, "会话任务已取消。")
+				_ = s.log(task.UserID, task.ID, "warn", "任务已取消，丢弃生成结果", "")
+				return nil
+			}
+		}
 		task.Status = model.TaskStatusFailed
 		task.Stage = "任务结果保存失败"
 		task.Error = taskFailureMessage(err)
 		task.CompletedAt = ptr(time.Now())
-		_ = s.repo.Save(task)
+		_, _ = s.repo.UpdateTaskTerminalState(task.ID, model.TaskStatusRunning, task.Status, task.Stage, task.Error, *task.CompletedAt)
+		if compactErr := s.finalizeTaskTextReplay(task.ID, model.TaskStatusFailed); compactErr != nil {
+			_ = s.log(task.UserID, task.ID, "error", "文本回放草稿归并失败", compactErr.Error())
+		}
 		_ = s.MarkBillingUncertain(task.BillingOrderID, "上游已成功但任务结果未保存："+task.Error)
 		_ = s.markSessionFailed(*task, task.Error)
 		_ = s.log(task.UserID, task.ID, "error", "任务结果保存失败", task.Error)
 		return err
+	}
+	if compactErr := s.finalizeTaskTextReplay(task.ID, model.TaskStatusSucceeded); compactErr != nil {
+		_ = s.log(task.UserID, task.ID, "error", "文本回放窗口更新失败", compactErr.Error())
 	}
 	if completedTask, fetchErr := s.repo.Task(task.ID); fetchErr == nil {
 		if registerErr := s.RegisterTaskOutputFromTask(*completedTask); registerErr != nil {
@@ -986,7 +1080,7 @@ func (s *Service) processTask(ctx context.Context, task model.Task) (map[string]
 		return s.processStoryboardRowsTask(ctx, task)
 	}
 	if strings.HasPrefix(task.Type, "canvas_") || canRunProviderTask(task) {
-		result, err := s.processCanvasGenerationTask(ctx, task.UserID, task.Type, task.Prompt, task.InputJSON)
+		result, err := s.processCanvasGenerationTask(ctx, task.UserID, task.ProjectID, task.Type, task.Prompt, task.InputJSON)
 		return result, nil, err
 	}
 	if task.Type == "agent_storyboard" {
@@ -1023,28 +1117,40 @@ func (s *Service) processAgentStoryboardTask(ctx context.Context, task model.Tas
 			return nil, nil, fmt.Errorf("Agent 会话输入解析失败：%w", err)
 		}
 	}
+	if !providerConfigReady(input.Config) {
+		return nil, nil, errors.New("请先配置可用的文本模型")
+	}
+	if err := validateStoryboardContext(input.ProjectStyle, input.Characters); err != nil {
+		return nil, nil, err
+	}
 	assets := input.CanvasAssets
 	if len(assets) == 0 {
 		assets = extractStoryboardAssets(input.CanvasSnapshot)
 	}
-	plan := fallbackAgentStoryboardPlan(task.Prompt)
-	if providerConfigReady(input.Config) {
-		config, err := s.resolveProviderConfig(input.Config)
-		if err != nil {
-			return nil, nil, err
-		}
-		result, err := runTextTask(ctx, canvasGenerationInput{Mode: "text", Prompt: s.buildAgentStoryboardPlannerPrompt(task.Prompt, input.Requirements, assets, 0, 0), Config: config})
-		if err != nil {
-			return nil, nil, err
-		}
-		text, _ := result["text"].(string)
-		nextPlan, err := parseAgentStoryboardPlan(text)
-		if err != nil {
-			return nil, nil, err
-		}
-		plan = nextPlan
+	config, err := s.resolveProviderConfig(input.Config)
+	if err != nil {
+		return nil, nil, err
 	}
-	return buildAgentStoryboardResult(task, plan, assets)
+	plannerPrompt, err := s.buildAgentStoryboardPlannerPrompt(task.UserID, task.Prompt, input.Requirements, assets, input.ProjectStyle, input.Characters, 0, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	result, err := runTextTask(ctx, canvasGenerationInput{Mode: "text", Prompt: plannerPrompt, Config: config, StreamText: true})
+	if err != nil {
+		return nil, nil, err
+	}
+	text, _ := result["text"].(string)
+	plan, err := parseAgentStoryboardPlan(text)
+	if err == nil {
+		err = validateStoryboardPlan(plan, 0, 0, input.Characters)
+	}
+	if err != nil {
+		plan, err = s.repairStoryboardPlan(ctx, task, input, config, text, err, 0, 0)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	return s.buildAgentStoryboardResult(task, plan, assets, input.ProjectStyle)
 }
 
 func (s *Service) processStoryboardRowsTask(ctx context.Context, task model.Task) (map[string]interface{}, []map[string]interface{}, error) {
@@ -1057,6 +1163,9 @@ func (s *Service) processStoryboardRowsTask(ctx context.Context, task model.Task
 	if !providerConfigReady(input.Config) {
 		return nil, nil, errors.New("请先配置可用的文本模型")
 	}
+	if err := validateStoryboardContext(input.ProjectStyle, input.Characters); err != nil {
+		return nil, nil, err
+	}
 	assets := input.CanvasAssets
 	if len(assets) == 0 {
 		assets = extractStoryboardAssets(input.CanvasSnapshot)
@@ -1065,39 +1174,37 @@ func (s *Service) processStoryboardRowsTask(ctx context.Context, task model.Task
 	if err != nil {
 		return nil, nil, err
 	}
-	result, err := runTextTask(ctx, canvasGenerationInput{Mode: "text", Prompt: s.buildAgentStoryboardPlannerPrompt(task.Prompt, input.Requirements, assets, input.ShotDuration, input.ShotCount), Config: config})
+	plannerPrompt, err := s.buildAgentStoryboardPlannerPrompt(task.UserID, task.Prompt, input.Requirements, assets, input.ProjectStyle, input.Characters, input.ShotDuration, input.ShotCount)
+	if err != nil {
+		return nil, nil, err
+	}
+	result, err := runTextTask(ctx, canvasGenerationInput{Mode: "text", Prompt: plannerPrompt, Config: config, StreamText: true})
 	if err != nil {
 		return nil, nil, err
 	}
 	text, _ := result["text"].(string)
 	plan, err := parseAgentStoryboardPlan(text)
 	if err == nil {
-		err = validateStoryboardShotDuration(plan, input.ShotDuration)
-	}
-	if err == nil {
-		err = validateStoryboardShotCount(plan, input.ShotCount)
+		err = validateStoryboardPlan(plan, input.ShotDuration, input.ShotCount, input.Characters)
 	}
 	if err != nil {
-		_ = s.repo.UpdateTaskProgress(task.ID, "修复分镜结构", 55)
-		repairPrompt := fmt.Sprintf("请修复下面的分镜 JSON。原始校验错误：%s。必须保持原有剧情和镜头内容，补齐缺失字段并修复非法字段值；durationSeconds 必须是 1 到 60 的整数。\n\n%s\n\n只返回完整 JSON，不要 markdown 或解释。\n\n原始输出：\n%s", err.Error(), storyboardCinematicQualityContract(input.ShotDuration, input.ShotCount), text)
-		repaired, repairErr := runTextTask(withProviderRequestKind(ctx, "repair"), canvasGenerationInput{Mode: "text", Prompt: repairPrompt, Config: config})
-		if repairErr != nil {
-			return nil, nil, fmt.Errorf("分镜结构修复失败：%w", repairErr)
-		}
-		repairedText, _ := repaired["text"].(string)
-		plan, err = parseAgentStoryboardPlan(repairedText)
-		if err == nil {
-			err = validateStoryboardShotDuration(plan, input.ShotDuration)
-		}
-		if err == nil {
-			err = validateStoryboardShotCount(plan, input.ShotCount)
-		}
+		plan, err = s.repairStoryboardPlan(ctx, task, input, config, text, err, input.ShotDuration, input.ShotCount)
 		if err != nil {
-			return nil, nil, fmt.Errorf("分镜模型结构修复后仍不合法：%w", err)
+			return nil, nil, err
 		}
 	}
 	rows := make([]map[string]any, 0, len(plan.Shots))
 	for index, shot := range plan.Shots {
+		imagePromptVariables := storyboardImagePromptValues(input.ProjectStyle.Prompt, plan.StyleGuide, shot)
+		videoPromptVariables := storyboardVideoPromptValues(input.ProjectStyle.Prompt, plan.StyleGuide, shot)
+		imagePrompt, promptErr := s.compileStoryboardImagePrompt(task.UserID, input.ProjectStyle.Prompt, plan.StyleGuide, shot)
+		if promptErr != nil {
+			return nil, nil, promptErr
+		}
+		videoPrompt, promptErr := s.compileStoryboardVideoPrompt(task.UserID, input.ProjectStyle.Prompt, plan.StyleGuide, shot)
+		if promptErr != nil {
+			return nil, nil, promptErr
+		}
 		matchedAssets := matchStoryboardAssets(assets, shot.AssetTags)
 		referenceNodeIDs := make([]string, 0, len(matchedAssets))
 		for _, asset := range matchedAssets {
@@ -1105,14 +1212,46 @@ func (s *Service) processStoryboardRowsTask(ctx context.Context, task model.Task
 		}
 		rows = append(rows, map[string]any{
 			"shotNumber": index + 1, "durationSeconds": shot.Duration, "plotDescription": shot.Description,
-			"dialogue": shot.Dialogue, "characters": []any{}, "shotSize": shot.ShotSize, "emotion": shot.Emotion,
+			"dialogue": shot.Dialogue, "characters": storyboardRowCharacters(shot, input.Characters), "shotSize": shot.ShotSize, "emotion": shot.Emotion,
 			"lightingAndAtmosphere": shot.Lighting, "audioEffects": shot.AudioEffects,
-			"imageGenerationPrompt": shot.VisualPrompt, "videoMotionPrompt": buildStoryboardVideoPrompt(plan.StyleGuide, shot),
+			"imageGenerationPrompt": imagePrompt, "videoMotionPrompt": videoPrompt,
+			"imagePromptTemplateVariables": imagePromptVariables, "videoPromptTemplateVariables": videoPromptVariables,
 			"camera": shot.Camera, "motion": shot.Motion, "timeBeats": shot.TimeBeats, "negativePrompt": shot.Negative,
+			"narrativeIntent": shot.Intent, "viewerPOV": shot.ViewerPOV, "performanceBlocking": shot.Performance,
+			"mustHave": shot.MustHave, "optionalDetails": shot.Optional, "continuityOut": shot.ContinuityOut,
 			"referenceNodeIds": referenceNodeIDs, "assetTags": shot.AssetTags,
 		})
 	}
 	return map[string]interface{}{"title": plan.Title, "rows": rows}, nil, nil
+}
+
+const maxStoryboardRepairAttempts = 2
+
+func (s *Service) repairStoryboardPlan(ctx context.Context, task model.Task, input agentStoryboardInput, config providerConfig, originalText string, validationErr error, shotDuration int, shotCount int) (agentStoryboardPlan, error) {
+	currentText := originalText
+	currentErr := validationErr
+	for attempt := 1; attempt <= maxStoryboardRepairAttempts; attempt++ {
+		_ = s.repo.UpdateTaskProgress(task.ID, "修复分镜结构", 55+attempt*10)
+		repairPrompt, promptErr := s.buildStoryboardRepairPrompt(task.UserID, task.Prompt, currentErr, input, currentText)
+		if promptErr != nil {
+			return agentStoryboardPlan{}, promptErr
+		}
+		repaired, repairErr := runTextTask(withProviderRequestKind(ctx, "repair"), canvasGenerationInput{Mode: "text", Prompt: repairPrompt, Config: config, StreamText: true})
+		if repairErr != nil {
+			return agentStoryboardPlan{}, fmt.Errorf("分镜结构修复失败：%w", repairErr)
+		}
+		repairedText, _ := repaired["text"].(string)
+		plan, parseErr := parseAgentStoryboardPlan(repairedText)
+		if parseErr == nil {
+			parseErr = validateStoryboardPlan(plan, shotDuration, shotCount, input.Characters)
+		}
+		if parseErr == nil {
+			return plan, nil
+		}
+		currentText = repairedText
+		currentErr = parseErr
+	}
+	return agentStoryboardPlan{}, fmt.Errorf("分镜模型结构修复后仍不合法：%w", currentErr)
 }
 
 func providerConfigReady(config providerConfig) bool {
@@ -1124,22 +1263,35 @@ func parseAgentStoryboardPlan(raw string) (agentStoryboardPlan, error) {
 	if err != nil {
 		return agentStoryboardPlan{}, err
 	}
+	if err := validateStoryboardJSONFields(jsonText); err != nil {
+		return agentStoryboardPlan{}, err
+	}
 	var plan agentStoryboardPlan
 	if err := json.Unmarshal([]byte(jsonText), &plan); err != nil {
 		return agentStoryboardPlan{}, fmt.Errorf("分镜 JSON 解析失败：%w", err)
 	}
 	plan.Title = defaultString(strings.TrimSpace(plan.Title), "影视分镜")
 	plan.Logline = defaultString(strings.TrimSpace(plan.Logline), "根据剧情生成的分镜方案")
-	plan.StyleGuide = defaultString(strings.TrimSpace(plan.StyleGuide), "真实电影机拍摄，保持角色、空间、道具、色彩和镜头语言一致。")
+	plan.StyleGuide = defaultString(strings.TrimSpace(plan.StyleGuide), "严格沿用当前项目画风，保持角色、空间、道具、色彩和视觉媒介一致。")
 	if len(plan.Shots) == 0 {
 		return agentStoryboardPlan{}, errors.New("分镜模型没有返回 shots")
 	}
 	if len(plan.Shots) > 12 {
-		plan.Shots = plan.Shots[:12]
+		return agentStoryboardPlan{}, fmt.Errorf("分镜数量最多 12 个，实际返回 %d 个", len(plan.Shots))
 	}
 	for i := range plan.Shots {
 		if strings.TrimSpace(plan.Shots[i].Title) == "" {
 			plan.Shots[i].Title = fmt.Sprintf("镜头 %d", i+1)
+		}
+		plan.Shots[i].CharacterIDs = nonNilStrings(plan.Shots[i].CharacterIDs)
+		plan.Shots[i].AssetTags = nonNilStrings(plan.Shots[i].AssetTags)
+		plan.Shots[i].Optional = nonNilStrings(plan.Shots[i].Optional)
+		plan.Shots[i].Intent = defaultString(strings.TrimSpace(plan.Shots[i].Intent), strings.TrimSpace(plan.Shots[i].Description))
+		plan.Shots[i].ViewerPOV = defaultString(strings.TrimSpace(plan.Shots[i].ViewerPOV), "客观观察当前主要角色与事件")
+		plan.Shots[i].Performance = defaultString(strings.TrimSpace(plan.Shots[i].Performance), strings.TrimSpace(plan.Shots[i].Description))
+		plan.Shots[i].ContinuityOut = defaultString(strings.TrimSpace(plan.Shots[i].ContinuityOut), "保持本镜头结尾的人物位置、动作状态、道具和光线方向进入下一镜")
+		if len(plan.Shots[i].MustHave) == 0 {
+			plan.Shots[i].MustHave = []string{"主要角色身份与当前版本稳定", "主要动作完成并有清晰落点", "结尾状态可供下一镜继承"}
 		}
 		if strings.TrimSpace(plan.Shots[i].VideoPrompt) == "" {
 			plan.Shots[i].VideoPrompt = defaultString(plan.Shots[i].VisualPrompt, plan.Shots[i].Description)
@@ -1157,6 +1309,55 @@ func parseAgentStoryboardPlan(raw string) (agentStoryboardPlan, error) {
 	return plan, nil
 }
 
+func validateStoryboardJSONFields(jsonText string) error {
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(jsonText), &root); err != nil {
+		return fmt.Errorf("分镜 JSON 解析失败：%w", err)
+	}
+	for _, field := range []string{"title", "logline", "styleGuide", "characters", "locations", "shots"} {
+		if _, ok := root[field]; !ok {
+			return fmt.Errorf("分镜 JSON 缺少受保护字段 %s", field)
+		}
+	}
+	var shots []map[string]json.RawMessage
+	if err := json.Unmarshal(root["shots"], &shots); err != nil {
+		return errors.New("分镜 JSON 的 shots 必须是数组")
+	}
+	required := []string{"title", "description", "durationSeconds", "dialogue", "characterIds", "narrativeIntent", "viewerPOV", "performanceBlocking", "shotSize", "emotion", "lightingAndAtmosphere", "audioEffects", "visualPrompt", "videoPrompt", "camera", "motion", "timeBeats", "mustHave", "optionalDetails", "continuityOut", "negativePrompt", "assetTags"}
+	for index, shot := range shots {
+		for _, field := range required {
+			if _, ok := shot[field]; !ok {
+				return fmt.Errorf("镜头 %d 缺少受保护字段 %s", index+1, field)
+			}
+		}
+	}
+	return nil
+}
+
+func nonNilStrings(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
+}
+
+func validateStoryboardContext(projectStyle storyboardProjectStyle, characters []storyboardCharacterCard) error {
+	if strings.TrimSpace(projectStyle.PresetID) == "" || strings.TrimSpace(projectStyle.Title) == "" || strings.TrimSpace(projectStyle.Prompt) == "" {
+		return errors.New("请先设置项目画风，再生成分镜")
+	}
+	if strings.TrimSpace(projectStyle.ProfileJSON) != "" {
+		if _, err := validateStyleProfileJSON(projectStyle.ProfileJSON); err != nil {
+			return err
+		}
+	}
+	for _, character := range characters {
+		if strings.TrimSpace(character.AssetID) == "" || strings.TrimSpace(character.VersionID) == "" || strings.TrimSpace(character.Name) == "" {
+			return errors.New("角色卡缺少当前资产版本，请刷新角色资产后再生成分镜")
+		}
+	}
+	return nil
+}
+
 func validateStoryboardShotDuration(plan agentStoryboardPlan, target int) error {
 	if target == 0 {
 		return nil
@@ -1172,6 +1373,22 @@ func validateStoryboardShotDuration(plan agentStoryboardPlan, target int) error 
 	return nil
 }
 
+func validateStoryboardPlan(plan agentStoryboardPlan, shotDuration int, shotCount int, characters []storyboardCharacterCard) error {
+	if utf8.RuneCountInString(strings.TrimSpace(plan.StyleGuide)) > 120 {
+		return errors.New("styleGuide 最多 120 个中文字符")
+	}
+	if err := validateStoryboardShotDuration(plan, shotDuration); err != nil {
+		return err
+	}
+	if err := validateStoryboardShotCount(plan, shotCount); err != nil {
+		return err
+	}
+	if err := validateStoryboardCharacterIDs(plan, characters); err != nil {
+		return err
+	}
+	return validateStoryboardComplexity(plan)
+}
+
 func validateStoryboardShotCount(plan agentStoryboardPlan, target int) error {
 	if target == 0 {
 		return nil
@@ -1185,57 +1402,154 @@ func validateStoryboardShotCount(plan agentStoryboardPlan, target int) error {
 	return nil
 }
 
+func validateStoryboardComplexity(plan agentStoryboardPlan) error {
+	issues := make([]string, 0)
+	for index, shot := range plan.Shots {
+		shotNumber := index + 1
+		if len(shot.CharacterIDs) > 2 {
+			issues = append(issues, fmt.Sprintf("镜头 %d 有 %d 名主要角色，最多 2 名", shotNumber, len(shot.CharacterIDs)))
+		}
+		if len(shot.MustHave) > 3 {
+			issues = append(issues, fmt.Sprintf("镜头 %d 有 %d 个必须完成项，最多 3 个", shotNumber, len(shot.MustHave)))
+		}
+		if beats := storyboardBeatCount(shot.TimeBeats); beats > 3 {
+			issues = append(issues, fmt.Sprintf("镜头 %d 有 %d 个时间节拍，最多 3 个", shotNumber, beats))
+		}
+		if movements := storyboardCameraMovementCount(shot.Motion); movements > 1 {
+			issues = append(issues, fmt.Sprintf("镜头 %d 包含 %d 种主运镜，最多 1 种", shotNumber, movements))
+		}
+		dialogueLimit := max(24, shot.Duration*5)
+		if dialogueLength := utf8.RuneCountInString(strings.TrimSpace(shot.Dialogue)); dialogueLength > dialogueLimit {
+			issues = append(issues, fmt.Sprintf("镜头 %d 台词 %d 字，%d 秒镜头最多约 %d 字", shotNumber, dialogueLength, shot.Duration, dialogueLimit))
+		}
+	}
+	if len(issues) == 0 {
+		return nil
+	}
+	return fmt.Errorf("镜头复杂度超限：%s", strings.Join(issues, "；"))
+}
+
+func validateStoryboardCharacterIDs(plan agentStoryboardPlan, characters []storyboardCharacterCard) error {
+	allowed := make(map[string]bool, len(characters))
+	for _, character := range characters {
+		allowed[character.AssetID] = true
+	}
+	for index, shot := range plan.Shots {
+		for _, assetID := range shot.CharacterIDs {
+			if !allowed[assetID] {
+				return fmt.Errorf("镜头 %d 引用了不存在或非当前版本的角色 assetId：%s", index+1, assetID)
+			}
+		}
+	}
+	return nil
+}
+
+func storyboardRowCharacters(shot agentStoryboardShot, characters []storyboardCharacterCard) []map[string]any {
+	byID := make(map[string]storyboardCharacterCard, len(characters))
+	for _, character := range characters {
+		byID[character.AssetID] = character
+	}
+	result := make([]map[string]any, 0, len(shot.CharacterIDs))
+	for _, assetID := range shot.CharacterIDs {
+		character, ok := byID[assetID]
+		if !ok {
+			continue
+		}
+		result = append(result, map[string]any{
+			"characterName":      character.Name,
+			"characterAssetId":   character.AssetID,
+			"characterVersionId": character.VersionID,
+		})
+	}
+	return result
+}
+
+func storyboardBeatCount(value string) int {
+	parts := strings.FieldsFunc(value, func(r rune) bool { return r == '；' || r == ';' || r == '\n' })
+	count := 0
+	for _, part := range parts {
+		if strings.TrimSpace(part) != "" {
+			count++
+		}
+	}
+	timecodeCount := len(storyboardTimecodePattern.FindAllString(value, -1))
+	return max(count, timecodeCount)
+}
+
+var storyboardTimecodePattern = regexp.MustCompile(`\d+(?:\.\d+)?\s*[-~—至到]\s*\d+(?:\.\d+)?\s*秒`)
+
+func storyboardCameraMovementCount(value string) int {
+	movements := []string{"推进", "推近", "拉远", "摇摄", "横移", "侧移", "跟拍", "跟随", "升降", "上升", "下降", "环绕", "俯冲", "变焦", "甩镜", "穿越"}
+	count := 0
+	for _, movement := range movements {
+		if strings.Contains(value, movement) {
+			count++
+		}
+	}
+	return count
+}
+
 func extractJSONText(raw string) (string, error) {
-	trimmed := strings.TrimSpace(raw)
-	trimmed = strings.TrimPrefix(trimmed, "```json")
-	trimmed = strings.TrimPrefix(trimmed, "```")
-	trimmed = strings.TrimSuffix(trimmed, "```")
-	start := strings.Index(trimmed, "{")
-	end := strings.LastIndex(trimmed, "}")
-	if start < 0 || end < start {
-		return "", errors.New("分镜模型返回的不是 JSON")
+	// Text models may prepend an explanation or append a Markdown fence despite
+	// the JSON-only contract. Scan complete JSON values instead of pairing the
+	// first opening brace with the final closing brace, which can merge prose and
+	// make an otherwise valid character breakdown fail validation.
+	for start := 0; start < len(raw); start++ {
+		if raw[start] != '{' && raw[start] != '[' {
+			continue
+		}
+		end := jsonValueEnd(raw, start)
+		if end < start {
+			continue
+		}
+		candidate := raw[start : end+1]
+		var decoded interface{}
+		if json.Unmarshal([]byte(candidate), &decoded) == nil {
+			return candidate, nil
+		}
 	}
-	return trimmed[start : end+1], nil
+	return "", errors.New("模型返回的不是 JSON")
 }
 
-func fallbackAgentStoryboardPlan(prompt string) agentStoryboardPlan {
-	title := shortTitle(prompt, 18)
-	return agentStoryboardPlan{
-		Title:      title,
-		Logline:    "围绕用户 brief 拆解的影视短片工作流。",
-		StyleGuide: "真实电影机拍摄，自然曝光，低饱和色彩，保持角色、空间、道具和镜头语言一致。",
-		Characters: []string{"主角：根据 brief 保持服装、动作动机和情绪连续。"},
-		Locations:  []string{"主场景：根据 brief 建立前景、中景、远景和可信光源。"},
-		Shots: []agentStoryboardShot{
-			{
-				Title:        "开场建立",
-				Description:  "建立故事空间、主角状态和情绪基调。",
-				VisualPrompt: "以真实电影机语言建立主要空间和角色状态，前景、中景、远景层次清晰。",
-				VideoPrompt:  "8 秒连续镜头，从故事空间中的人类尺度前景开始，摄影机缓慢前推，先展示环境细节和主角状态，中段让关键冲突迹象进入画面，结尾停在主角反应。自然曝光，真实高光滚降，空气介质和轻微胶片颗粒，避免廉价特效感、均匀平光和无尺度参照。",
-				Camera:       "中景，平视到轻微低机位，中等焦段",
-				Motion:       "缓慢前推，结尾停住",
-			},
-			{
-				Title:        "冲突推进",
-				Description:  "推进动作、关系变化和核心冲突。",
-				VisualPrompt: "主体动作、道具和环境反馈同时出现，空间调度明确。",
-				VideoPrompt:  "10 秒连续镜头，摄影机从主角侧后方跟随移动，开始画面聚焦人物动作和关键道具，中段冲突升级，环境中的灯光、尘埃、水汽或人群反应随动作发生变化，结尾用中近景压住情绪。真实电影机拍摄，受控冷暖对比，运动处保留自然模糊，避免过度锐化、过亮轮廓和塑料表面。",
-				Camera:       "中近景，侧后方跟拍，中长焦压缩空间",
-				Motion:       "跟拍加轻微抬镜",
-			},
-			{
-				Title:        "结果与钩子",
-				Description:  "交代结果并留下下一段钩子。",
-				VisualPrompt: "主角反应、环境后果和悬念信息同框。",
-				VideoPrompt:  "8 秒连续镜头，从冲突后的环境细节开始，摄影机缓慢横移揭示结果，中段主角进入画面并完成关键反应，结尾停在一个可延续的悬念物或空间方向。真实电影摄影质感，暗部保留层次，高光不过曝，低饱和色彩，避免海报式摆拍、干净空白背景和主体完整居中平铺。",
-				Camera:       "中景到近景，横移构图",
-				Motion:       "缓慢横移，结尾定格",
-			},
-		},
+func jsonValueEnd(source string, start int) int {
+	stack := make([]byte, 0, 8)
+	inString := false
+	escaped := false
+	for index := start; index < len(source); index++ {
+		value := source[index]
+		if inString {
+			if escaped {
+				escaped = false
+			} else if value == '\\' {
+				escaped = true
+			} else if value == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch value {
+		case '"':
+			inString = true
+		case '{', '[':
+			stack = append(stack, value)
+		case '}', ']':
+			if len(stack) == 0 {
+				return -1
+			}
+			opener := stack[len(stack)-1]
+			if (value == '}' && opener != '{') || (value == ']' && opener != '[') {
+				return -1
+			}
+			stack = stack[:len(stack)-1]
+			if len(stack) == 0 {
+				return index
+			}
+		}
 	}
+	return -1
 }
 
-func buildAgentStoryboardResult(task model.Task, plan agentStoryboardPlan, assets []storyboardAsset) (map[string]interface{}, []map[string]interface{}, error) {
+func (s *Service) buildAgentStoryboardResult(task model.Task, plan agentStoryboardPlan, assets []storyboardAsset, projectStyle storyboardProjectStyle) (map[string]interface{}, []map[string]interface{}, error) {
 	prefix := "agent-" + task.ID
 	scriptID := prefix + "-script"
 	sceneID := prefix + "-scenes"
@@ -1247,15 +1561,19 @@ func buildAgentStoryboardResult(task model.Task, plan agentStoryboardPlan, asset
 	ops := []map[string]any{
 		nodeOpWithMetadata(scriptID, "text", "剧本 · "+shortTitle(plan.Title, 24), 0, 0, map[string]any{"workflowKind": "script", "workflowTitle": "剧本", "status": "success", "content": strings.Join([]string{plan.Title, "", plan.Logline, "", task.Prompt}, "\n")}),
 		nodeOpWithMetadata(sceneID, "text", "场景设定", sceneX, 0, map[string]any{"workflowKind": "scene", "workflowTitle": "场景", "status": "success", "content": listContent("场景", plan.Locations)}),
-		nodeOpWithMetadata(styleID, "text", "风格板", styleX, 0, map[string]any{"workflowKind": "styleboard", "workflowTitle": "风格板", "status": "success", "content": plan.StyleGuide}),
+		nodeOpWithMetadata(styleID, "text", "项目画风 · "+shortTitle(projectStyle.Title, 24), styleX, 0, map[string]any{"workflowKind": "styleboard", "workflowTitle": "项目画风", "workflowDescription": plan.StyleGuide, "stylePresetId": projectStyle.PresetID, "styleProfileJson": projectStyle.ProfileJSON, "status": "success", "content": projectStyle.Prompt, "prompt": projectStyle.Prompt}),
 		nodeOpWithMetadata(referenceID, "text", "参考素材组", 0, 270, map[string]any{"workflowKind": "reference_set", "workflowTitle": "参考素材组", "status": "success", "content": storyboardAssetsContent(assets)}),
 		nodeOpWithMetadata(finalID, "video", "成片 · 待生成", styleX, 270, map[string]any{"workflowKind": "final", "workflowTitle": "成片", "status": "idle"}),
 		connectOp(scriptID, sceneID),
 	}
 	resultShots := make([]map[string]any, 0, len(plan.Shots))
 	for index, shot := range plan.Shots {
+		videoPrompt, err := s.compileStoryboardVideoPrompt(task.UserID, projectStyle.Prompt, plan.StyleGuide, shot)
+		if err != nil {
+			return nil, nil, err
+		}
 		shotID := fmt.Sprintf("%s-shot-%d", prefix, index+1)
-		matchedAssets := matchStoryboardAssets(assets, shot.AssetTags)
+		matchedAssets := matchStoryboardAssetsForShot(assets, shot)
 		assetIDs := make([]string, 0, len(matchedAssets))
 		for _, asset := range matchedAssets {
 			assetIDs = append(assetIDs, asset.ID)
@@ -1267,9 +1585,9 @@ func buildAgentStoryboardResult(task model.Task, plan agentStoryboardPlan, asset
 				"workflowDescription":   shotDescription(shot),
 				"shotIndex":             index + 1,
 				"generationMode":        "video",
-				"prompt":                buildStoryboardVideoPrompt(plan.StyleGuide, shot),
-				"composerContent":       shotComposerContent(buildStoryboardVideoPrompt(plan.StyleGuide, shot), matchedAssets),
-				"videoEditOperation":    "image_to_video",
+				"prompt":                videoPrompt,
+				"composerContent":       shotComposerContent(videoPrompt, matchedAssets),
+				"videoEditOperation":    "text_to_video",
 				"assetTags":             shot.AssetTags,
 				"referenceAssetNodeIds": assetIDs,
 				"status":                "idle",
@@ -1303,12 +1621,17 @@ func extractStoryboardAssets(snapshot map[string]any) []storyboardAsset {
 	assets := make([]storyboardAsset, 0, len(rawNodes))
 	for _, raw := range rawNodes {
 		node, _ := raw.(map[string]interface{})
-		if node == nil || fmt.Sprint(node["type"]) != "image" {
+		if node == nil {
 			continue
 		}
 		metadata, _ := node["metadata"].(map[string]interface{})
 		if metadata == nil {
 			metadata = map[string]interface{}{}
+		}
+		nodeType := stringValue(node["type"])
+		isCharacterCard := stringValue(metadata["workflowKind"]) == "character" && stringValue(metadata["characterAssetId"]) != "" && stringValue(metadata["characterVersionId"]) != ""
+		if nodeType != "image" && !isCharacterCard {
+			continue
 		}
 		id := stringValue(node["id"])
 		if id == "" {
@@ -1317,10 +1640,18 @@ func extractStoryboardAssets(snapshot map[string]any) []storyboardAsset {
 		tags := stringSlice(metadata["assetTags"])
 		prompt := stringValue(metadata["prompt"])
 		content := stringValue(metadata["content"])
-		if len(tags) == 0 && prompt == "" && content == "" {
+		if len(tags) == 0 && prompt == "" && content == "" && !isCharacterCard {
 			continue
 		}
-		assets = append(assets, storyboardAsset{ID: id, Title: defaultString(stringValue(node["title"]), "未命名图片"), Type: "image", Tags: tags, Prompt: prompt})
+		assets = append(assets, storyboardAsset{
+			ID:                 id,
+			Title:              defaultString(stringValue(node["title"]), "未命名图片"),
+			Type:               defaultString(nodeType, "reference"),
+			Tags:               tags,
+			Prompt:             prompt,
+			CharacterAssetID:   stringValue(metadata["characterAssetId"]),
+			CharacterVersionID: stringValue(metadata["characterVersionId"]),
+		})
 		if len(assets) >= 30 {
 			break
 		}
@@ -1354,6 +1685,34 @@ func matchStoryboardAssets(assets []storyboardAsset, shotTags []string) []storyb
 		}
 		if len(matched) >= 6 {
 			break
+		}
+	}
+	return matched
+}
+
+func matchStoryboardAssetsForShot(assets []storyboardAsset, shot agentStoryboardShot) []storyboardAsset {
+	matched := make([]storyboardAsset, 0, 6)
+	seen := make(map[string]bool, 6)
+	wantedCharacters := make(map[string]bool, len(shot.CharacterIDs))
+	for _, assetID := range shot.CharacterIDs {
+		wantedCharacters[assetID] = true
+	}
+	for _, asset := range assets {
+		if len(matched) >= 6 {
+			break
+		}
+		if !seen[asset.ID] && wantedCharacters[asset.CharacterAssetID] {
+			matched = append(matched, asset)
+			seen[asset.ID] = true
+		}
+	}
+	for _, asset := range matchStoryboardAssets(assets, shot.AssetTags) {
+		if len(matched) >= 6 {
+			break
+		}
+		if !seen[asset.ID] {
+			matched = append(matched, asset)
+			seen[asset.ID] = true
 		}
 	}
 	return matched
@@ -1458,24 +1817,89 @@ func shotDescription(shot agentStoryboardShot) string {
 	return strings.Join(filtered, "\n\n")
 }
 
-func buildStoryboardVideoPrompt(styleGuide string, shot agentStoryboardShot) string {
+func storyboardImagePromptValues(projectStyle string, styleGuide string, shot agentStoryboardShot) map[string]string {
+	negative := defaultString(strings.TrimSpace(shot.Negative), "禁止换脸、服装变化、手部畸形、乱码、风格突变和塑料材质")
+	return map[string]string{
+		"项目视觉":   storyboardProjectVisualSummary(projectStyle, styleGuide),
+		"首帧构图":   compactPromptText(shot.VisualPrompt+"；光影："+shot.Lighting, 360),
+		"表演起始状态": compactPromptText(shot.Performance, 180),
+		"负面要求":   compactPromptText(negative, 140),
+	}
+}
+
+func buildStoryboardImagePrompt(projectStyle string, styleGuide string, shot agentStoryboardShot) string {
+	definition, _ := promptDefinition(promptOperationStoryboardFirstFrame)
+	prompt, _ := renderPromptTemplate(definition, definition.DefaultContent, storyboardImagePromptValues(projectStyle, styleGuide, shot))
+	return prompt
+}
+
+func (s *Service) compileStoryboardImagePrompt(userID string, projectStyle string, styleGuide string, shot agentStoryboardShot) (string, error) {
+	compiled, err := s.compilePrompt(userID, promptOperationStoryboardFirstFrame, storyboardImagePromptValues(projectStyle, styleGuide, shot))
+	return compiled.Content, err
+}
+
+func storyboardVideoPromptValues(projectStyle string, styleGuide string, shot agentStoryboardShot) map[string]string {
 	camera := defaultString(strings.TrimSpace(shot.Camera), strings.TrimSpace(shot.ShotSize)+"，平视机位，中等焦段，主体与环境保持空间层次")
 	motion := defaultString(strings.TrimSpace(shot.Motion), "固定机位，主体在画面内完成动作")
 	timeBeats := defaultString(strings.TrimSpace(shot.TimeBeats), fmt.Sprintf("0-%d秒：%s", shot.Duration, strings.TrimSpace(shot.Description)))
 	negative := defaultString(strings.TrimSpace(shot.Negative), "禁止换脸、服装变化、手部畸形、乱码、闪烁、风格突变和动作僵硬")
-	parts := []string{
-		"【氛围与画质】\n" + strings.TrimSpace(styleGuide),
-		"【镜头设计】\n" + strings.TrimSpace(shot.ShotSize) + "；" + camera + "；运镜：" + motion,
-		"【画面内容】\n" + timeBeats,
+	values := map[string]string{
+		"项目视觉":  storyboardProjectVisualSummary(projectStyle, styleGuide),
+		"镜头意图":  compactPromptText(shot.Intent+"；观众视点："+shot.ViewerPOV+"；情绪："+shot.Emotion, 150),
+		"首帧构图":  compactPromptText(shot.VisualPrompt+"；光影："+shot.Lighting, 280),
+		"表演与调度": compactPromptText(shot.Performance, 180),
+		"摄影机":   compactPromptText(strings.TrimSpace(shot.ShotSize)+"；"+camera+"；主运镜："+motion, 220),
+		"时间节拍":  compactPromptText(timeBeats, 240),
+		"运动与结尾": compactPromptText(shot.VideoPrompt+"；连续性结尾："+shot.ContinuityOut, 240),
+		"声音":    compactPromptText(strings.TrimSpace(shot.Dialogue)+"；音效："+strings.TrimSpace(shot.AudioEffects), 160),
+		"负面要求":  compactPromptText(negative, 160),
 	}
-	if strings.TrimSpace(shot.Dialogue) != "" || strings.TrimSpace(shot.AudioEffects) != "" {
-		parts = append(parts, "【台词/声音】\n"+strings.TrimSpace(shot.Dialogue)+"；音效："+strings.TrimSpace(shot.AudioEffects))
+	if len(shot.MustHave) > 0 {
+		priority := "必须完成：" + strings.Join(shot.MustHave, "；")
+		if len(shot.Optional) > 0 {
+			priority += "。可以简化：" + strings.Join(shot.Optional, "；")
+		}
+		values["执行优先级"] = compactPromptText(priority, 140)
 	}
-	if strings.TrimSpace(shot.VideoPrompt) != "" {
-		parts = append(parts, "【执行约束】\n"+strings.TrimSpace(shot.VideoPrompt))
+	return values
+}
+
+func buildStoryboardVideoPrompt(projectStyle string, styleGuide string, shot agentStoryboardShot) string {
+	definition, _ := promptDefinition(promptOperationStoryboardVideo)
+	prompt, _ := renderPromptTemplate(definition, definition.DefaultContent, storyboardVideoPromptValues(projectStyle, styleGuide, shot))
+	return prompt
+}
+
+func (s *Service) compileStoryboardVideoPrompt(userID string, projectStyle string, styleGuide string, shot agentStoryboardShot) (string, error) {
+	compiled, err := s.compilePrompt(userID, promptOperationStoryboardVideo, storyboardVideoPromptValues(projectStyle, styleGuide, shot))
+	return compiled.Content, err
+}
+
+func storyboardProjectVisualSummary(projectStyle string, styleGuide string) string {
+	identity := ""
+	for _, line := range strings.Split(projectStyle, "\n") {
+		if strings.TrimSpace(line) != "" {
+			identity = strings.TrimSpace(line)
+			break
+		}
 	}
-	parts = append(parts, "【负面要求】\n"+negative)
-	return strings.Join(parts, "\n\n")
+	parts := make([]string, 0, 2)
+	if identity != "" {
+		parts = append(parts, identity)
+	}
+	if strings.TrimSpace(styleGuide) != "" {
+		parts = append(parts, strings.TrimSpace(styleGuide))
+	}
+	return compactPromptText(strings.Join(parts, "；"), 180)
+}
+
+func compactPromptText(value string, limit int) string {
+	text := strings.TrimSpace(value)
+	if utf8.RuneCountInString(text) <= limit {
+		return text
+	}
+	runes := []rune(text)
+	return strings.TrimSpace(string(runes[:limit])) + "。"
 }
 
 func shotComposerContent(prompt string, assets []storyboardAsset) string {
@@ -1578,65 +2002,6 @@ func (s *Service) markSessionFailed(task model.Task, message string) error {
 	}
 	return s.repo.Create(&model.Message{ID: newID(), UserID: task.UserID, SessionID: task.SessionID, Role: "assistant", Content: defaultString(message, "会话任务失败。")})
 }
-
-func buildAgentResult(task model.Task) (map[string]any, []map[string]any) {
-	title := strings.TrimSpace(task.Prompt)
-	if len([]rune(title)) > 28 {
-		title = string([]rune(title)[:28]) + "..."
-	}
-	result := map[string]any{
-		"taskId":    task.ID,
-		"operation": task.Operation,
-		"provider":  defaultString(task.Provider, "internal-agent"),
-		"model":     defaultString(task.Model, "workflow-router"),
-		"plan": []map[string]any{
-			{"kind": "script", "title": "创意脚本", "content": task.Prompt},
-			{"kind": "scene", "title": "主场景", "content": "根据用户输入拆解为可生成的视频场景。"},
-			{"kind": "shot", "title": "镜头 1", "content": "建立画面、主体、风格和运镜。"},
-			{"kind": "final", "title": "成片", "content": "等待视频生成 Provider 回填成片结果。"},
-		},
-	}
-	ops := []map[string]any{
-		nodeOp("script-"+task.ID, "text", "剧本 · "+title, 0, 0, "script", task.Prompt),
-		nodeOp("scene-"+task.ID, "text", "场景 · 主场景", 380, 0, "scene", "主场景设定、角色关系、视觉风格。"),
-		nodeOpWithMetadata("shot-"+task.ID, "video", "分镜 · 镜头 1", 760, 0, map[string]any{"workflowKind": "shot", "status": "idle", "generationMode": "video", "prompt": task.Prompt, "composerContent": task.Prompt, "videoEditOperation": "text_to_video"}),
-		nodeOp("final-"+task.ID, "video", "成片 · 待生成", 1140, 0, "final", ""),
-		connectOp("script-"+task.ID, "scene-"+task.ID),
-		connectOp("scene-"+task.ID, "shot-"+task.ID),
-		connectOp("shot-"+task.ID, "final-"+task.ID),
-	}
-	return result, ops
-}
-
-func buildVideoWorkflowResult(task model.Task) (map[string]any, []map[string]any) {
-	title := strings.TrimSpace(task.Prompt)
-	if len([]rune(title)) > 28 {
-		title = string([]rune(title)[:28]) + "..."
-	}
-	operation := defaultString(task.Operation, strings.TrimPrefix(task.Type, "video_"))
-	result := map[string]any{
-		"taskId":    task.ID,
-		"operation": operation,
-		"provider":  defaultString(task.Provider, "internal-agent"),
-		"model":     defaultString(task.Model, "workflow-router"),
-		"plan": []map[string]any{
-			{"kind": "reference_set", "title": "参考素材组", "content": "收集原视频、参考图、参考音频和版本样片。"},
-			{"kind": "shot", "title": "编辑镜头", "content": task.Prompt},
-			{"kind": "final", "title": "结果版本", "content": "等待 provider 生成或人工确认后回填版本结果。"},
-		},
-	}
-	ops := []map[string]any{
-		nodeOp("video-brief-"+task.ID, "text", "编辑需求 · "+title, 0, 0, "script", task.Prompt),
-		nodeOpWithMetadata("video-ref-"+task.ID, "text", "参考素材组", 380, 0, map[string]any{"workflowKind": "reference_set", "status": "idle", "content": "原片、参考图、参考音频、风格板或历史版本。", "videoEditOperation": operation}),
-		nodeOpWithMetadata("video-shot-"+task.ID, "video", "视频任务 · "+operation, 760, 0, map[string]any{"workflowKind": "shot", "status": "idle", "generationMode": "video", "prompt": task.Prompt, "composerContent": task.Prompt, "videoEditOperation": operation}),
-		nodeOpWithMetadata("video-result-"+task.ID, "video", "结果版本 · 待回填", 1140, 0, map[string]any{"workflowKind": "final", "status": "idle", "videoEditOperation": operation, "versionLabel": "v1"}),
-		connectOp("video-brief-"+task.ID, "video-ref-"+task.ID),
-		connectOp("video-ref-"+task.ID, "video-shot-"+task.ID),
-		connectOp("video-shot-"+task.ID, "video-result-"+task.ID),
-	}
-	return result, ops
-}
-
 func nodeOp(id string, nodeType string, title string, x int, y int, workflowKind string, content string) map[string]any {
 	return nodeOpWithMetadata(id, nodeType, title, x, y, map[string]any{"content": content, "workflowKind": workflowKind, "status": "idle"})
 }

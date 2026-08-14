@@ -6,6 +6,7 @@ import { nanoid } from "nanoid";
 import { scopedLocalStorage } from "@/lib/user-scope";
 import { modelProtocolCapability, normalizeModelProtocol, type ModelProtocol } from "@/lib/model-protocols";
 import { normalizeVideoDuration, normalizeVideoResolution } from "@/lib/video-generation-options";
+import type { ModelCapabilityConfig } from "@/lib/model-capabilities";
 
 export type ApiCallFormat = "openai" | "gemini";
 export type ChannelInterfaceType = ModelProtocol;
@@ -31,8 +32,12 @@ export type ModelChannel = {
         displayName?: string;
         capability: ModelCapability;
         protocol?: ModelProtocol;
-        billingMode: "fixed_request" | "per_second";
+        billingMode: "fixed_request" | "per_second" | "token";
         unitPriceMicrocredits: number;
+        inputTokenPriceMicrocredits?: number;
+        outputTokenPriceMicrocredits?: number;
+        cachedTokenPriceMicrocredits?: number;
+        capabilityConfig?: ModelCapabilityConfig;
     }>;
 };
 
@@ -276,8 +281,9 @@ export const useConfigStore = create<ConfigStore>()(
     ),
 );
 
-export function normalizeConfigSnapshot(snapshot: ConfigStoreSnapshot) {
-    const persistedConfig = (snapshot.config || {}) as Partial<AiConfig>;
+export function normalizeConfigSnapshot(snapshot: ConfigStoreSnapshot | undefined = {}) {
+    // 坏存储/旧版本快照可能是 undefined 或缺 config，兜底为 defaultConfig，保证渲染不崩溃
+    const persistedConfig = (snapshot?.config || {}) as Partial<AiConfig>;
     const config = { ...defaultConfig, ...persistedConfig };
     const hasPersistedChannels = Array.isArray(persistedConfig.channels);
     if (!hasPersistedChannels) config.channels = [];
@@ -303,7 +309,9 @@ export function normalizeConfigSnapshot(snapshot: ConfigStoreSnapshot) {
             audioVoice: config.audioVoice || defaultConfig.audioVoice,
             audioFormat: config.audioFormat || defaultConfig.audioFormat,
             audioSpeed: config.audioSpeed || defaultConfig.audioSpeed,
-            audioInstructions: config.audioInstructions || "",
+			audioInstructions: config.audioInstructions || "",
+            // 旧版全局 systemPrompt 会跨任务污染请求；提示词定制现已按 operation 由服务端编译。
+            systemPrompt: "",
             videoSeconds: normalizeVideoDuration(config.videoSeconds),
             vquality: normalizeVideoResolution(config.vquality),
             videoGenerateAudio: config.videoGenerateAudio || "true",
@@ -481,9 +489,10 @@ export function defaultBaseUrlForApiFormat(apiFormat: ApiCallFormat) {
 
 export function defaultBaseUrlForChannelInterface(interfaceType?: ChannelInterfaceType) {
     if (interfaceType === "gemini-veo") return GEMINI_BASE_URL;
+    if (interfaceType === "novita-video") return "https://api.novita.ai/v3";
     if (interfaceType === "volcengine-ark-image" || interfaceType === "volcengine-ark-video") return "https://ark.cn-beijing.volces.com/api/v3";
     if (interfaceType === "volcengine-jimeng-image" || interfaceType === "volcengine-jimeng-video") return "https://visual.volcengineapi.com";
-    if (interfaceType === "newapi" || interfaceType === "newapi-channel-1" || interfaceType === "newapi-channel-2" || interfaceType === "xai-video") return "";
+    if (interfaceType === "grok-image" || interfaceType === "newapi" || interfaceType === "newapi-channel-1" || interfaceType === "newapi-channel-2" || interfaceType === "xai-video") return "";
     return OPENAI_BASE_URL;
 }
 

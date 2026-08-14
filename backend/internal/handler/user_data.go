@@ -16,6 +16,50 @@ import (
 )
 
 func RegisterUserDataRoutes(r *gin.RouterGroup, svc *service.Service) {
+	r.GET("/settings/prompt-templates", func(c *gin.Context) {
+		user, err := currentUser(c, svc)
+		if err != nil {
+			failService(c, err)
+			return
+		}
+		preferences, err := svc.UserPromptPreferences(user)
+		if err != nil {
+			failService(c, err)
+			return
+		}
+		ok(c, gin.H{"preferences": preferences})
+	})
+	r.PATCH("/settings/prompt-templates/:operation", func(c *gin.Context) {
+		user, err := currentUser(c, svc)
+		if err != nil {
+			failService(c, err)
+			return
+		}
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64<<10)
+		var req service.UserPromptCustomizationRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			fail(c, http.StatusBadRequest, err)
+			return
+		}
+		customization, err := svc.UpdateUserPromptCustomization(user, c.Param("operation"), req)
+		if err != nil {
+			failService(c, err)
+			return
+		}
+		ok(c, gin.H{"customization": customization})
+	})
+	r.DELETE("/settings/prompt-templates/:operation", func(c *gin.Context) {
+		user, err := currentUser(c, svc)
+		if err != nil {
+			failService(c, err)
+			return
+		}
+		if err := svc.ResetUserPromptCustomization(user, c.Param("operation")); err != nil {
+			failService(c, err)
+			return
+		}
+		ok(c, gin.H{"ok": true})
+	})
 	r.GET("/settings/oss", func(c *gin.Context) {
 		user, err := currentUser(c, svc)
 		if err != nil {
@@ -217,6 +261,31 @@ func RegisterUserDataRoutes(r *gin.RouterGroup, svc *service.Service) {
 		}
 		c.DataFromReader(stream.StatusCode, stream.ContentLength, resource.MimeType, stream.Body, nil)
 	})
+	r.GET("/public/resources/:id/file", func(c *gin.Context) {
+		stream, err := svc.OpenPublicResourceRange(c.Param("id"), c.Query("expires"), c.Query("signature"), c.GetHeader("Range"))
+		if err != nil {
+			failService(c, err)
+			return
+		}
+		defer stream.Body.Close()
+		resource := stream.Resource
+		if resource.MimeType == "" {
+			resource.MimeType = "application/octet-stream"
+		}
+		c.Header("Cache-Control", "public, max-age=0, must-revalidate")
+		c.Header("Accept-Ranges", "bytes")
+		c.Header("Referrer-Policy", "no-referrer")
+		c.Header("X-Content-Type-Options", "nosniff")
+		if stream.ContentRange != "" {
+			c.Header("Content-Range", stream.ContentRange)
+		}
+		if seeker, ok := stream.Body.(io.ReadSeeker); ok {
+			c.Header("Content-Type", resource.MimeType)
+			http.ServeContent(c.Writer, c.Request, resource.ID, resource.UpdatedAt, seeker)
+			return
+		}
+		c.DataFromReader(stream.StatusCode, stream.ContentLength, resource.MimeType, stream.Body, nil)
+	})
 	r.GET("/assets", func(c *gin.Context) {
 		user, err := currentUser(c, svc)
 		if err != nil {
@@ -229,6 +298,19 @@ func RegisterUserDataRoutes(r *gin.RouterGroup, svc *service.Service) {
 			return
 		}
 		ok(c, gin.H{"assets": assets})
+	})
+	r.GET("/user-data/snapshot", func(c *gin.Context) {
+		user, err := currentUser(c, svc)
+		if err != nil {
+			failService(c, err)
+			return
+		}
+		snapshot, err := svc.UserDataSnapshot(user.ID)
+		if err != nil {
+			failService(c, err)
+			return
+		}
+		ok(c, snapshot)
 	})
 	r.GET("/assets/:id", func(c *gin.Context) {
 		user, err := currentUser(c, svc)

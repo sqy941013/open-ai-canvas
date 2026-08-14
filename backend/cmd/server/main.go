@@ -45,7 +45,7 @@ func main() {
 	if err := svc.EnsureSystemChannelModels(); err != nil {
 		log.Fatal(err)
 	}
-	if err := svc.EnsureDefaultStoryboardPromptTemplate(); err != nil {
+	if err := svc.EnsureDefaultPromptTemplates(); err != nil {
 		log.Fatal(err)
 	}
 	if err := svc.EnsureBuiltinProjectWorkflowTemplate(); err != nil {
@@ -73,6 +73,7 @@ func main() {
 	})
 	handler.RegisterOAuthCallbackRoutes(r, svc)
 	handler.RegisterAuthRoutes(api, svc)
+	handler.RegisterFeatureAvailabilityRoutes(api, svc)
 	handler.RegisterAdminRoutes(api, svc)
 	handler.RegisterAdminAnalyticsRoutes(api, svc)
 	handler.RegisterAnnouncementRoutes(api, svc)
@@ -85,7 +86,9 @@ func main() {
 	handler.RegisterSessionRoutes(api, svc)
 	handler.RegisterSkillRoutes(api, svc)
 	handler.RegisterUserDataRoutes(api, svc)
-	handler.RegisterProjectRoutes(api, svc)
+	projectAPI := api.Group("")
+	projectAPI.Use(handler.RequireFeature(svc, service.FeatureShortDrama))
+	handler.RegisterProjectRoutes(projectAPI, svc)
 	handler.RegisterCanvasShareRoutes(api, svc)
 
 	addr := env("CANVAS_BACKEND_ADDR", ":8080")

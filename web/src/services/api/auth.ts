@@ -1,11 +1,11 @@
-import axios from "axios";
-
 import type { ModelChannel } from "@/stores/use-config-store";
 import type { CreditLedgerEntry } from "@/services/api/wallet";
 import type { GenerationTask, TaskStatus } from "@/services/api/task-center";
 import type { CanvasDrawingEngineSetting } from "@/lib/canvas/canvas-drawing-engine";
+import type { FeatureAvailability } from "@/stores/use-user-store";
+import { apiClient, request } from "@/services/api/request";
 
-const api = axios.create({ baseURL: import.meta.env.VITE_CANVAS_BACKEND_URL || "/api", withCredentials: true });
+const api = apiClient;
 
 export type LocalUser = {
     id: string;
@@ -33,6 +33,7 @@ export type AuthSessionPayload = {
     systemChannels?: ModelChannel[];
     runtimeLimits?: RuntimeLimits;
     drawingEngine?: CanvasDrawingEngineSetting;
+    features?: FeatureAvailability;
 };
 
 export type RuntimeLimits = {
@@ -201,24 +202,54 @@ export type ModelPricing = {
     updatedAt: string;
 };
 
-export type StoryboardPromptTemplate = {
+export type PromptTemplate = {
     id: string;
+    operation: string;
     name: string;
+    version: number;
     content: string;
+    outputType: "json" | "text";
     enabled: boolean;
     createdBy?: string;
     createdAt: string;
     updatedAt: string;
 };
 
-export type StoryboardPromptVariable = {
+export type PromptTemplateVariable = {
     label: string;
     placeholder: string;
 };
 
+export type PromptOperationDefinition = {
+    operation: string;
+    label: string;
+    category: string;
+    description: string;
+    outputType: "json" | "text";
+    schemaKey?: string;
+    variables: PromptTemplateVariable[];
+    outputContract: string;
+};
+
+export type UserPromptCustomization = {
+    id: string;
+    operation: string;
+    mode: "inherit" | "append" | "rewrite";
+    content: string;
+    baseTemplateId: string;
+    updatedAt: string;
+};
+
+export type UserPromptPreference = {
+    definition: PromptOperationDefinition;
+    template: PromptTemplate | null;
+    customization?: UserPromptCustomization;
+    outdated: boolean;
+};
+
 export type AdminOSSSetting = {
     enabled: boolean;
-    provider: "aliyun";
+    provider: "aliyun" | "tencent";
     region: string;
     endpoint: string;
     bucket: string;
@@ -293,18 +324,6 @@ export type RuntimePolicySetting = {
     updatedAt?: string;
 };
 
-type BackendEnvelope<T> = { code: number; data: T; msg: string };
-
-async function request<T>(promise: Promise<{ data: BackendEnvelope<T> }>) {
-    try {
-        const response = await promise;
-        if (response.data.code !== 0) throw new Error(response.data.msg || "请求失败");
-        return response.data.data;
-    } catch (error) {
-        if (axios.isAxiosError<BackendEnvelope<unknown>>(error)) throw new Error(error.response?.data?.msg || error.message || "请求失败");
-        throw error;
-    }
-}
 
 export function getAuthSettings() {
     return request<{ firstUser: boolean; registrationEnabled: boolean; linuxdoEnabled: boolean; emailEnabled: boolean; emailCodeRequired: boolean }>(api.get("/auth/settings"));
@@ -321,6 +340,18 @@ export function getAuthSession() {
 
 export function getSystemChannels() {
     return request<{ channels: ModelChannel[] }>(api.get("/channels/system"));
+}
+
+export function getFeatureAvailability() {
+    return request<{ features: FeatureAvailability }>(api.get("/features"));
+}
+
+export function getAdminFeatureAvailability() {
+    return request<{ features: FeatureAvailability }>(api.get("/admin/settings/features"));
+}
+
+export function updateAdminFeatureAvailability(features: Pick<FeatureAvailability, "shortDramaEnabled" | "taskCenterEnabled" | "creditsEnabled">) {
+    return request<{ features: FeatureAvailability }>(api.patch("/admin/settings/features", features));
 }
 
 export function login(input: { username: string; password: string }) {
@@ -397,20 +428,32 @@ export function deleteAdminChannel(id: string) {
     return request<{ ok: boolean }>(api.delete(`/admin/channels/${encodeURIComponent(id)}`));
 }
 
-export function listAdminStoryboardPromptTemplates() {
-    return request<{ templates: StoryboardPromptTemplate[]; variables: StoryboardPromptVariable[] }>(api.get("/admin/storyboard-prompts"));
+export function listAdminPromptTemplates() {
+    return request<{ templates: PromptTemplate[]; definitions: PromptOperationDefinition[] }>(api.get("/admin/prompt-templates"));
 }
 
-export function createAdminStoryboardPromptTemplate(input: Partial<Pick<StoryboardPromptTemplate, "name" | "content" | "enabled">>) {
-    return request<{ template: StoryboardPromptTemplate }>(api.post("/admin/storyboard-prompts", input));
+export function createAdminPromptTemplate(input: Pick<PromptTemplate, "operation" | "name" | "content"> & { enabled?: boolean }) {
+    return request<{ template: PromptTemplate }>(api.post("/admin/prompt-templates", input));
 }
 
-export function updateAdminStoryboardPromptTemplate(id: string, input: Partial<Pick<StoryboardPromptTemplate, "name" | "content" | "enabled">>) {
-    return request<{ template: StoryboardPromptTemplate }>(api.patch(`/admin/storyboard-prompts/${encodeURIComponent(id)}`, input));
+export function updateAdminPromptTemplate(id: string, input: Pick<PromptTemplate, "operation" | "name" | "content"> & { enabled?: boolean }) {
+    return request<{ template: PromptTemplate }>(api.patch(`/admin/prompt-templates/${encodeURIComponent(id)}`, input));
 }
 
-export function deleteAdminStoryboardPromptTemplate(id: string) {
-    return request<{ ok: boolean }>(api.delete(`/admin/storyboard-prompts/${encodeURIComponent(id)}`));
+export function deleteAdminPromptTemplate(id: string) {
+    return request<{ ok: boolean }>(api.delete(`/admin/prompt-templates/${encodeURIComponent(id)}`));
+}
+
+export function listUserPromptPreferences() {
+    return request<{ preferences: UserPromptPreference[] }>(api.get("/settings/prompt-templates"));
+}
+
+export function updateUserPromptCustomization(operation: string, input: Pick<UserPromptCustomization, "mode" | "content">) {
+    return request<{ customization: UserPromptCustomization }>(api.patch(`/settings/prompt-templates/${encodeURIComponent(operation)}`, input));
+}
+
+export function resetUserPromptCustomization(operation: string) {
+    return request<{ ok: boolean }>(api.delete(`/settings/prompt-templates/${encodeURIComponent(operation)}`));
 }
 
 export function getAdminOSSSetting() {

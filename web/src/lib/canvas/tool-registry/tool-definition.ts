@@ -81,6 +81,10 @@ export type ToolbarHandlers = {
     onNodeAngle: (node: CanvasNodeData) => void;
     onNodeViewImage: (node: CanvasNodeData) => void;
     onNodeExtractVideoLastFrame: (node: CanvasNodeData) => void;
+    onNodeExtractAudioFromVideo: (node: CanvasNodeData) => void;
+    onNodeTrimVideoRegenerate: (node: CanvasNodeData) => void;
+    onNodeSubtitles: (node: CanvasNodeData) => void;
+    onNodeTimeline: (node: CanvasNodeData) => void;
     onNodeReversePrompt: (node: CanvasNodeData) => void;
     onNodeToggleFreeResize: (node: CanvasNodeData) => void;
     onNodeToggleLocked: (node: CanvasNodeData) => void;
@@ -103,6 +107,9 @@ export type ToolContext = {
     nodeMetadata?: CanvasNodeMetadata;
     /** 视频尾帧提取中（节点悬停工具栏用） */
     extractingVideoFrame: boolean;
+    /** 视频音频提取/片段截取进行中（节点悬停工具栏用） */
+    extractingAudio: boolean;
+    trimmingVideo: boolean;
     /** 合并视频中（多选工具栏用） */
     mergingVideos: boolean;
     /** 主工具栏面板开关状态（仅主工具栏使用） */
@@ -110,6 +117,26 @@ export type ToolContext = {
     appearancePanelOpen: boolean;
     settingsPanelOpen: boolean;
     handlers: ToolbarHandlers;
+};
+
+/** 添加节点菜单只依赖创建动作，避免右键菜单为工具栏状态补无意义字段。 */
+export type AddNodeMenuContext = {
+    workspaceMode: CanvasWorkspaceMode;
+    isProjectLinked: boolean;
+    handlers: Pick<ToolbarHandlers,
+        | "onAddText"
+        | "onAddImage"
+        | "onAddVideo"
+        | "onAddAudio"
+        | "onAddScript"
+        | "onAddFrame"
+        | "onAddDrawing"
+        | "onChooseStyle"
+        | "onOpenDirector"
+        | "onUpload"
+        | "onOpenMyAssets"
+        | "onOpenProjectCharacters"
+    >;
 };
 
 /** 工具定义——注册表的基本单元 */
@@ -137,17 +164,16 @@ export type ToolDefinition = {
     run: (ctx: ToolContext, event?: MouseEvent<HTMLElement>) => void;
 };
 
-/** 添加节点菜单命令（复用 CanvasCreateCommand 结构 + 上下文谓词） */
+/** 添加节点菜单命令：项目级动作与真正的节点创建分开呈现。 */
 export type AddNodeMenuCommand = {
     id: string;
     label: string;
     icon: ReactNode;
     badge?: string;
-    /** 菜单分区：创作节点 / 导入资源 */
-    section: "node" | "resource";
+    section: "node" | "project" | "resource";
     defaultOrder: number;
-    applicable?: (ctx: ToolContext) => boolean;
-    run: (ctx: ToolContext) => void;
+    applicable?: (ctx: AddNodeMenuContext) => boolean;
+    run: (ctx: AddNodeMenuContext) => void;
 };
 
 /** 用户偏好——排序与显隐 */

@@ -1,5 +1,5 @@
 import { Tooltip } from "antd";
-import { ArrowLeft, BarChart3, BellRing, Coins, FileClock, HardDrive, Home, Infinity as InfinityIcon, Mail, MessageSquareText, Paintbrush, PanelLeftClose, PanelLeftOpen, RadioTower, Settings2, ShieldCheck, TicketCheck, UsersRound } from "lucide-react";
+import { ArrowLeft, BarChart3, BellRing, Coins, FileClock, HardDrive, Home, Infinity as InfinityIcon, Mail, MessageSquareText, Paintbrush, PanelLeftClose, PanelLeftOpen, RadioTower, Settings2, ShieldCheck, TicketCheck, ToggleLeft, UsersRound } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { Link, NavLink, Outlet } from "react-router";
 
@@ -25,7 +25,7 @@ const adminNavigation: Array<{ label: string; items: AdminNavigationItem[] }> = 
         items: [
             { path: "/admin/users", label: "用户管理", description: "账号、角色与状态", icon: <UsersRound className="size-4" /> },
             { path: "/admin/channels", label: "系统渠道", description: "渠道、模型与售价", icon: <RadioTower className="size-4" /> },
-            { path: "/admin/storyboard-prompts", label: "分镜提示词", description: "Agent 提示词版本", icon: <MessageSquareText className="size-4" /> },
+            { path: "/admin/prompt-templates", label: "提示词模板", description: "平台创作策略版本", icon: <MessageSquareText className="size-4" /> },
         ],
     },
     {
@@ -40,11 +40,12 @@ const adminNavigation: Array<{ label: string; items: AdminNavigationItem[] }> = 
     {
         label: "系统配置",
         items: [
+            { path: "/admin/settings/features", label: "功能开放", description: "菜单、页面与积分模式", icon: <ToggleLeft className="size-4" /> },
             { path: "/admin/settings/drawing-engine", label: "绘图工具", description: "画布绘图节点默认引擎", icon: <Paintbrush className="size-4" /> },
             { path: "/admin/settings/runtime-policy", label: "资源与策略", description: "配额、并发、频控与超时", icon: <Settings2 className="size-4" /> },
             { path: "/admin/settings/access", label: "登录与注册", description: "注册策略与 Linux.do", icon: <ShieldCheck className="size-4" /> },
             { path: "/admin/settings/email", label: "邮件服务", description: "注册验证码 SMTP", icon: <Mail className="size-4" /> },
-            { path: "/admin/settings/storage", label: "存储服务", description: "OSS 与资源存储", icon: <HardDrive className="size-4" /> },
+            { path: "/admin/settings/storage", label: "存储服务", description: "对象存储与资源存储", icon: <HardDrive className="size-4" /> },
         ],
     },
 ];
@@ -78,10 +79,10 @@ export function AdminShell() {
                 <AdminNavigation collapsed={collapsed} />
                 <div className="shrink-0 border-t border-border/70 p-2">
                     <Tooltip title={collapsed ? "更新日志" : undefined} placement="right">
-                        <AppChangelogButton className={cn("flex h-8 w-full items-center rounded text-[var(--fs-label)] text-foreground/52 transition-colors hover:bg-foreground/[.055] hover:text-foreground", collapsed ? "justify-center px-0" : "gap-2 px-2")} showVersion={!collapsed} />
+                        <AppChangelogButton className={cn("flex h-8 w-full items-center rounded text-[var(--fs-label)] text-foreground/52 transition-colors hover:bg-surface-hover hover:text-foreground", collapsed ? "justify-center px-0" : "gap-2 px-2")} showVersion={!collapsed} />
                     </Tooltip>
                     <Tooltip title={collapsed ? "返回创作台" : undefined} placement="right">
-                        <NavLink to="/canvas" className={cn("flex h-8 items-center rounded text-[var(--fs-label)] text-foreground/52 transition-colors hover:bg-foreground/[.055] hover:text-foreground", collapsed ? "justify-center px-0" : "gap-2 px-2")}>
+                        <NavLink to="/canvas" className={cn("flex h-8 items-center rounded text-[var(--fs-label)] text-foreground/52 transition-colors hover:bg-surface-hover hover:text-foreground", collapsed ? "justify-center px-0" : "gap-2 px-2")}>
                             <Home className="size-3.5" />
                             {!collapsed ? <span>返回创作台</span> : null}
                         </NavLink>
@@ -99,8 +100,8 @@ export function AdminShell() {
 export function AdminPageFrame({ title, description, actions, back, children }: { title: string; description: string; actions?: ReactNode; back?: { label: string; onClick: () => void }; children: ReactNode }) {
     return (
         <WorkspacePage>
-            <div className="mx-auto w-full max-w-[1440px] pb-5">
-                <header className="flex min-h-[64px] flex-col gap-3 border-b border-border/75 pb-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="w-full pb-5">
+                <header className="flex min-h-14 flex-col gap-3 border-b border-border/75 pb-3 sm:flex-row sm:items-center sm:justify-between">
                     <div className="flex min-w-0 items-center gap-2.5">
                         {back ? (
                             <Tooltip title={back.label}>
@@ -124,13 +125,13 @@ export function AdminPageFrame({ title, description, actions, back, children }: 
 
 function MobileAdminNavigation() {
     return (
-        <nav className="hide-scrollbar flex shrink-0 gap-1 overflow-x-auto border-b border-border/70 bg-background px-3 py-2 lg:hidden" aria-label="管理后台分区">
+        <nav className="app-workspace-navigation hide-scrollbar flex shrink-0 gap-1 overflow-x-auto border-b border-border/70 px-3 py-2 lg:hidden" aria-label="管理后台分区">
             {adminNavigation.flatMap((group) => group.items).map((item) => (
-                <NavLink key={item.path} to={item.path} end={item.path === "/admin"} className={({ isActive }) => cn("app-workspace-nav-link flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-xs transition-colors", isActive ? "is-active font-medium" : "text-foreground/60 hover:bg-foreground/[.05] hover:text-foreground")}>
+                <NavLink key={item.path} to={item.path} end={item.path === "/admin"} className={({ isActive }) => cn("app-workspace-nav-link flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-xs transition-colors", isActive ? "is-active font-medium" : "text-foreground/60 hover:bg-surface-hover hover:text-foreground")}>
                     {item.icon}<span>{item.label}</span>
                 </NavLink>
             ))}
-            <AppChangelogButton className="grid size-8 shrink-0 place-items-center rounded-md text-foreground/55 transition-colors hover:bg-foreground/[.05] hover:text-foreground [&_svg]:size-4" />
+            <AppChangelogButton className="grid size-8 shrink-0 place-items-center rounded-md text-foreground/55 transition-colors hover:bg-surface-hover hover:text-foreground [&_svg]:size-4" />
         </nav>
     );
 }
@@ -150,7 +151,7 @@ function AdminNavigation({ collapsed }: { collapsed: boolean }) {
                                     className={({ isActive }) => cn(
                                         "app-workspace-nav-link flex h-9 items-center rounded-md text-[var(--fs-body)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
                                         collapsed ? "justify-center px-0" : "gap-2.5 px-2.5",
-                                        isActive ? "is-active font-medium" : "text-foreground/62 hover:bg-foreground/[.05] hover:text-foreground",
+                                        isActive ? "is-active font-medium" : "text-foreground/62 hover:bg-surface-hover hover:text-foreground",
                                     )}
                                 >
                                     {item.icon}{!collapsed ? <span className="truncate">{item.label}</span> : null}

@@ -16,7 +16,7 @@ import { CanvasNodeType, type CanvasNodeData, type CanvasNodeMetadata, type Canv
 import { ImageToolSettingsModal } from "./canvas-image-toolbar-settings-modal";
 import { IMAGE_QUICK_TOOLS_STORAGE_KEY, buildImageToolbarTools, defaultImageQuickToolIds, isImageQuickToolId, readImageQuickToolsConfig, type ImageQuickToolId } from "./canvas-image-toolbar-tools";
 
-type CanvasNodeHoverToolbarProps = {
+type CanvasNodeToolbarProps = {
     node: CanvasNodeData | null;
     viewport: ViewportTransform;
     containerRef: RefObject<HTMLDivElement | null>;
@@ -42,7 +42,13 @@ type CanvasNodeHoverToolbarProps = {
     onAngle: (node: CanvasNodeData) => void;
     onViewImage: (node: CanvasNodeData) => void;
     onExtractVideoLastFrame: (node: CanvasNodeData) => void;
+    onExtractAudioFromVideo: (node: CanvasNodeData) => void;
+    onTrimVideoRegenerate: (node: CanvasNodeData) => void;
+    onSubtitles: (node: CanvasNodeData) => void;
+    onTimeline: (node: CanvasNodeData) => void;
     extractingVideoFrame: boolean;
+    extractingAudio: boolean;
+    trimmingVideo: boolean;
     onReversePrompt: (node: CanvasNodeData) => void;
     onRetry: (node: CanvasNodeData) => void;
     onToggleFreeResize: (node: CanvasNodeData) => void;
@@ -77,7 +83,7 @@ type ToolbarTool = {
 const MAX_IMAGE_QUICK_TOOLS = 7;
 const NODE_DOCK_LABELS_STORAGE_KEY = "canvas-node-dock-show-labels-v1";
 
-export function CanvasNodeHoverToolbar({
+export function CanvasNodeToolbar({
     node,
     viewport,
     containerRef,
@@ -103,14 +109,20 @@ export function CanvasNodeHoverToolbar({
     onAngle,
     onViewImage,
     onExtractVideoLastFrame,
+    onExtractAudioFromVideo,
+    onTrimVideoRegenerate,
+    onSubtitles,
+    onTimeline,
     extractingVideoFrame,
+    extractingAudio,
+    trimmingVideo,
     onReversePrompt,
     onRetry,
     onToggleFreeResize,
     onToggleLocked,
     onDelete,
     workspaceMode = "professional",
-}: CanvasNodeHoverToolbarProps) {
+}: CanvasNodeToolbarProps) {
     const [quickImageToolIds, setQuickImageToolIds] = useState<ImageQuickToolId[]>(defaultImageQuickToolIds);
     const [draftImageToolIds, setDraftImageToolIds] = useState<ImageQuickToolId[]>(defaultImageQuickToolIds);
     const [showDockLabels, setShowDockLabels] = useState(true);
@@ -239,8 +251,8 @@ export function CanvasNodeHoverToolbar({
         onNodeToggleDialog: onToggleDialog, onNodeAnnotate: onAnnotate, onNodeGenerateImage: onGenerateImage, onNodeUpload: onUpload, onNodeDownload: onDownload,
         onNodeSaveAsset: onSaveAsset, onNodeMaskEdit: onMaskEdit, onNodeEmotion: onEmotion, onNodePortraitTexture: onPortraitTexture, onNodeCrop: onCrop,
         onNodeSplit: onSplit, onNodeUpscale: onUpscale, onNodeSuperResolve: onSuperResolve, onNodeAngle: onAngle, onNodeViewImage: onViewImage,
-        onNodeExtractVideoLastFrame: onExtractVideoLastFrame, onNodeReversePrompt: onReversePrompt, onNodeToggleFreeResize: onToggleFreeResize,
-        onNodeToggleLocked: onToggleLocked, onNodeCopyPrompt: copyImagePrompt,
+        onNodeExtractVideoLastFrame: onExtractVideoLastFrame, onNodeExtractAudioFromVideo: onExtractAudioFromVideo, onNodeTrimVideoRegenerate: onTrimVideoRegenerate, onNodeReversePrompt: onReversePrompt, onNodeToggleFreeResize: onToggleFreeResize,
+        onNodeSubtitles: onSubtitles, onNodeTimeline: onTimeline, onNodeToggleLocked: onToggleLocked, onNodeCopyPrompt: copyImagePrompt,
     } as Partial<ToolbarHandlers> as ToolbarHandlers;
 
     const nodeHoverCtx: ToolContext = {
@@ -255,6 +267,8 @@ export function CanvasNodeHoverToolbar({
         node,
         nodeMetadata: node.metadata,
         extractingVideoFrame,
+        extractingAudio,
+        trimmingVideo,
         mergingVideos: false,
         addPanelOpen: false,
         appearancePanelOpen: false,
@@ -342,7 +356,7 @@ export function CanvasNodeHoverToolbar({
         <>
             <div
                 ref={toolbarRef}
-                className="canvas-node-toolbar absolute z-[var(--z-panel-floating)] flex -translate-x-1/2 -translate-y-full items-end justify-center overflow-visible"
+                className="canvas-node-toolbar absolute z-[var(--z-node-toolbar)] flex -translate-x-1/2 -translate-y-full items-end justify-center overflow-visible"
                 style={{ left: anchor.left, top: anchor.top, width: "max-content", maxWidth: `min(calc(100% - 20px), ${showDockLabels ? 840 : 560}px)`, color: theme.node.text }}
                 onMouseEnter={() => onKeep(node.id)}
                 onMouseLeave={() => {
@@ -459,10 +473,10 @@ export function CanvasNodeInfoModal({ node, open, onClose, onMetadataChange, rea
     };
 
     const title = (
-        <div className="flex items-center justify-between gap-4 pr-10">
+        <div className="canvas-node-inspector-title">
             <div className="min-w-0">
-                <div className="text-[var(--fs-heading-lg)] font-semibold tracking-[-0.02em]">节点信息</div>
-                {node ? <div className="mt-0.5 truncate text-xs opacity-45">{node.id}</div> : null}
+                <div className="text-[var(--fs-heading-lg)] font-semibold">节点信息</div>
+                {node ? <div className="canvas-node-inspector-id">{node.id}</div> : null}
             </div>
             <Segmented
                 size="small"
@@ -478,75 +492,70 @@ export function CanvasNodeInfoModal({ node, open, onClose, onMetadataChange, rea
 
     return (
         <Modal
-            className="canvas-node-info-modal"
+            className="workspace-modal canvas-node-info-modal"
             title={title}
             open={open && Boolean(node)}
             centered
             footer={null}
-            width={720}
             onCancel={onClose}
-            styles={{ body: { paddingTop: 8 } }}
+            styles={{ body: { paddingTop: 4 } }}
         >
             {node ? (
-                <div className="h-[min(68vh,640px)] min-h-[420px] text-sm" style={{ color: theme.node.text }}>
+                <div className="canvas-node-inspector" style={{ color: theme.node.text }}>
                     {view === "info" ? (
-                        <div className="thin-scrollbar h-full space-y-4 overflow-auto pr-1">
-                            <div className="grid gap-2 rounded-2xl border p-3" style={{ background: theme.node.fill, borderColor: theme.node.stroke }}>
-                                <div className="grid grid-cols-2 gap-2 max-sm:grid-cols-1">
+                        <div className="thin-scrollbar canvas-node-inspector-scroll">
+                            <section className="canvas-node-inspector-section">
+                                <div className="canvas-node-inspector-section-heading"><span>基础信息</span><em>{node.metadata?.status || "idle"}</em></div>
+                                <div className="canvas-node-inspector-facts">
                                     <InfoRow label="类型" value={nodeTypeLabel} />
-                                    <InfoRow label="状态" value={node.metadata?.status || "idle"} />
                                     <InfoRow label="尺寸" value={`${Math.round(node.width)} x ${Math.round(node.height)}`} />
                                     <InfoRow label="位置" value={`${Math.round(node.position.x)}, ${Math.round(node.position.y)}`} />
                                     {batchCount > 1 ? <InfoRow label="图片组" value={`${batchCount} 张`} /> : null}
                                     {imageBytes ? <InfoRow label="图片大小" value={formatBytes(imageBytes)} /> : null}
                                 </div>
-                                {node.type === CanvasNodeType.Image ? (
-                                    <div className="border-t pt-3" style={{ borderColor: theme.toolbar.border }}>
-                                        <div className="mb-2 text-xs font-medium opacity-45">项目资产分类</div>
-                                        <div className="flex flex-wrap gap-1.5">
-                                            {assetCategoryOptions.map((option) => {
-                                                const active = assetCategory === option.value;
-                                                return <button key={option.value} type="button" disabled={readOnly} onClick={() => saveAssetCategory(option.value)} className="h-7 rounded-md border px-2 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-60" style={{ borderColor: active ? theme.accent.primary : theme.toolbar.border, background: active ? theme.accent.primarySoft : theme.toolbar.panel, color: active ? theme.accent.primary : theme.node.muted }}>{option.label}</button>;
-                                            })}
-                                        </div>
-                                        <div className="mt-2 text-[var(--fs-label)] leading-5 opacity-45">生成后会按此分类进入项目资产；角色、场景和画风工作流会自动预填。</div>
-                                    </div>
-                                ) : null}
-                                {node.metadata?.prompt ? (
-                                    <div className="rounded-xl border px-3 py-2" style={{ borderColor: theme.toolbar.border, background: theme.toolbar.panel }}>
-                                        <div className="mb-1 text-xs font-medium opacity-45">提示词</div>
-                                        <div className="whitespace-pre-wrap break-words leading-6">{node.metadata.prompt}</div>
-                                    </div>
-                                ) : null}
-                                {node.type === CanvasNodeType.Skill && node.metadata?.skillSnapshot ? (
-                                    <div className="rounded-xl border px-3 py-2" style={{ borderColor: theme.toolbar.border, background: theme.toolbar.panel }}>
-                                        <div className="mb-1 text-xs font-medium opacity-45">技能模板</div>
-                                        <div className="whitespace-pre-wrap break-words leading-6">{node.metadata.skillSnapshot.template}</div>
-                                        {node.metadata.skillSnapshot.outputContract ? (
-                                            <>
-                                                <div className="mb-1 mt-3 text-xs font-medium opacity-45">输出约束</div>
-                                                <div className="whitespace-pre-wrap break-words leading-6">{node.metadata.skillSnapshot.outputContract}</div>
-                                            </>
-                                        ) : null}
-                                    </div>
-                                ) : null}
-                            </div>
+                            </section>
 
                             {node.type === CanvasNodeType.Image ? (
-                                <div className="rounded-2xl border p-3" style={{ background: theme.toolbar.panel, borderColor: theme.node.stroke }}>
-                                    <div className="mb-2 flex items-center justify-between gap-3">
+                                <section className="canvas-node-inspector-section">
+                                    <div className="canvas-node-inspector-section-heading"><span>项目资产分类</span></div>
+                                    <div className="canvas-node-inspector-options">
+                                        {assetCategoryOptions.map((option) => {
+                                            const active = assetCategory === option.value;
+                                            return <button key={option.value} type="button" disabled={readOnly} aria-pressed={active} onClick={() => saveAssetCategory(option.value)} className={active ? "is-active" : ""}>{option.label}</button>;
+                                        })}
+                                    </div>
+                                    <p className="canvas-node-inspector-help">生成后会按此分类进入项目资产；角色、场景和画风工作流会自动预填。</p>
+                                </section>
+                            ) : null}
+
+                            {node.metadata?.prompt ? (
+                                <section className="canvas-node-inspector-section">
+                                    <div className="canvas-node-inspector-section-heading"><span>提示词</span></div>
+                                    <div className="canvas-node-inspector-copy">{node.metadata.prompt}</div>
+                                </section>
+                            ) : null}
+
+                            {node.type === CanvasNodeType.Skill && node.metadata?.skillSnapshot ? (
+                                <section className="canvas-node-inspector-section">
+                                    <div className="canvas-node-inspector-section-heading"><span>技能模板</span></div>
+                                    <div className="canvas-node-inspector-copy">{node.metadata.skillSnapshot.template}</div>
+                                    {node.metadata.skillSnapshot.outputContract ? <><div className="canvas-node-inspector-subheading">输出约束</div><div className="canvas-node-inspector-copy">{node.metadata.skillSnapshot.outputContract}</div></> : null}
+                                </section>
+                            ) : null}
+
+                            {node.type === CanvasNodeType.Image ? (
+                                <section className="canvas-node-inspector-section">
+                                    <div className="canvas-node-inspector-section-heading">
                                         <div>
-                                            <div className="text-sm font-semibold">资产标签</div>
-                                            <div className="mt-0.5 text-xs opacity-45">一条标签描述一个角色、环境、道具或镜头用途。</div>
+                                            <span>资产标签</span>
+                                            <p>一条标签描述一个角色、环境、道具或镜头用途。</p>
                                         </div>
-                                        <span className="shrink-0 text-xs opacity-45">{assetTags.length} 条</span>
+                                        <em>{assetTags.length} 条</em>
                                     </div>
                                     {readOnly ? (
-                                        <div className="mb-2 rounded-lg border px-3 py-2 text-xs opacity-55" style={{ borderColor: theme.toolbar.border }}>
-                                            分享画布为只读，标签无法编辑。
-                                        </div>
+                                        <div className="canvas-node-inspector-notice">分享画布为只读，标签无法编辑。</div>
                                     ) : (
-                                        <div className="flex gap-2">
+                                        <div className="canvas-node-inspector-tag-editor">
                                             <Input
                                                 value={assetTagInput}
                                                 placeholder="例如：角色: 张三"
@@ -558,7 +567,7 @@ export function CanvasNodeInfoModal({ node, open, onClose, onMetadataChange, rea
                                             </Button>
                                         </div>
                                     )}
-                                    <div className="mt-3 flex min-h-10 flex-wrap gap-2 rounded-xl border px-2 py-2" style={{ borderColor: theme.toolbar.border, background: theme.node.fill }}>
+                                    <div className="canvas-node-inspector-tags">
                                         {assetTags.length ? (
                                             assetTags.map((tag) => (
                                                 <Tag key={tag} closable={!readOnly} onClose={() => (readOnly ? onUnauthorized?.() : removeAssetTag(tag))} className="!m-0 !rounded-lg !px-2 !py-1 !text-sm">
@@ -566,20 +575,20 @@ export function CanvasNodeInfoModal({ node, open, onClose, onMetadataChange, rea
                                                 </Tag>
                                             ))
                                         ) : (
-                                            <span className="px-1 py-1 text-xs opacity-40">{readOnly ? "暂无标签" : "还没有标签，输入后点击“加入”或按 Enter。"}</span>
+                                            <span className="canvas-node-inspector-empty-label">{readOnly ? "暂无标签" : "还没有标签，输入后点击“加入”或按 Enter。"}</span>
                                         )}
                                     </div>
-                                </div>
+                                </section>
                             ) : null}
 
                             {node.metadata?.errorDetails ? (
-                                <div className="rounded-2xl border p-3 text-red-500" style={{ borderColor: theme.node.stroke }}>
+                                <section className="canvas-node-inspector-error">
                                     {generationErrorMessage(node.metadata.errorDetails)}
-                                </div>
+                                </section>
                             ) : null}
                         </div>
                     ) : (
-                        <pre className="thin-scrollbar h-full overflow-auto rounded-2xl border p-3 text-xs leading-5" style={{ background: theme.node.fill, borderColor: theme.node.stroke, color: theme.node.text }}>
+                        <pre className="thin-scrollbar canvas-node-inspector-json" style={{ color: theme.node.text }}>
                             {json}
                         </pre>
                     )}
@@ -591,9 +600,9 @@ export function CanvasNodeInfoModal({ node, open, onClose, onMetadataChange, rea
 
 function InfoRow({ label, value }: { label: string; value: ReactNode }) {
     return (
-        <div className="rounded-xl border px-3 py-2" style={{ borderColor: "rgba(148,163,184,.22)" }}>
-            <div className="mb-1 text-xs font-medium opacity-45">{label}</div>
-            <div className="min-w-0 whitespace-pre-wrap break-words text-sm font-medium leading-5">{value}</div>
+        <div className="canvas-node-inspector-fact">
+            <div>{label}</div>
+            <strong>{value}</strong>
         </div>
     );
 }

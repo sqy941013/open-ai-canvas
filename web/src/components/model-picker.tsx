@@ -2,10 +2,13 @@ import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 
 import { Check, ChevronDown, Coins, Cpu } from "lucide-react";
 import { Popover } from "antd";
 
-import { canvasThemes } from "@/lib/canvas-theme";
+import { canvasThemes, type CanvasTheme } from "@/lib/canvas-theme";
+import { modelCapabilityConfigFor, videoDurationOptions } from "@/lib/model-capabilities";
+import { compatibleModelInGroup, groupModelsByDisplayName, modelCompatibilityError, resolveCompatibleModel, type ModelRequirements } from "@/lib/model-selection";
 import { cn } from "@/lib/utils";
 import { modelDisplayName, modelOptionLabel, modelOptionName, resolveModelChannel, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
+import { useUserStore } from "@/stores/use-user-store";
 
 type ModelPickerProps = {
     config: AiConfig;
@@ -18,38 +21,43 @@ type ModelPickerProps = {
     onMissingConfig?: () => void;
     showSelectedPrice?: boolean;
     variant?: "default" | "creation";
+    requirements?: ModelRequirements;
 };
 
-export function ModelPicker({ config, value, onChange, capability, className, fullWidth = false, placeholder = "选择模型", onMissingConfig, showSelectedPrice = true, variant = "default" }: ModelPickerProps) {
+export function ModelPicker({ config, value, onChange, capability, className, fullWidth = false, placeholder = "选择模型", onMissingConfig, showSelectedPrice = true, variant = "default", requirements }: ModelPickerProps) {
+    const creditsEnabled = useUserStore((state) => state.features.creditsEnabled);
     const pickerId = useId();
-    const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    // 双保险：即使 store merge 写出非法 theme，这里也兜底到 dark，避免 "reading 'node'" 崩溃
+    const rawTheme = useThemeStore((state) => state.theme);
+    const theme = (canvasThemes[rawTheme as keyof typeof canvasThemes] ?? canvasThemes.dark) as CanvasTheme;
     const [open, setOpen] = useState(false);
     const menuRef = useRef<HTMLDivElement>(null);
     const triggerRef = useRef<HTMLButtonElement>(null);
-    const options = useMemo(
-        () => {
-            const filtered = selectableModelsByCapability(config, capability);
-            const current = value?.trim();
-            const currentIncluded = current ? filtered.includes(current) : true;
-            return Array.from(new Set([...filtered, ...(!currentIncluded && current ? [current] : [])].filter((model): model is string => Boolean(model))));
-        },
-        [capability, config, value],
-    );
+    const options = useMemo(() => {
+        const filtered = selectableModelsByCapability(config, capability);
+        const current = value?.trim();
+        const currentIncluded = current ? filtered.includes(current) : true;
+        return Array.from(new Set([...filtered, ...(!currentIncluded && current ? [current] : [])].filter((model): model is string => Boolean(model))));
+    }, [capability, config, value]);
     const optionGroups = useMemo(() => {
         const channelGroups = config.channels
             .map((channel) => ({
                 key: channel.id,
                 label: channel.name || "未命名渠道",
                 scope: channel.scope === "system" ? "系统渠道" : "自定义渠道",
-                models: options.filter((model) => resolveModelChannel(config, model).id === channel.id),
+                models: groupModelsByDisplayName(
+                    config,
+                    options.filter((model) => resolveModelChannel(config, model).id === channel.id),
+                ),
             }))
             .filter((group) => group.models.length);
-        const groupedModels = new Set(channelGroups.flatMap((group) => group.models));
+        const groupedModels = new Set(channelGroups.flatMap((group) => group.models.flatMap((modelGroup) => modelGroup.models)));
         const ungroupedModels = options.filter((model) => !groupedModels.has(model));
-        return ungroupedModels.length ? [...channelGroups, { key: "ungrouped", label: "其他模型", scope: "未指定渠道", models: ungroupedModels }] : channelGroups;
+        return ungroupedModels.length ? [...channelGroups, { key: "ungrouped", label: "其他模型", scope: "未指定渠道", models: groupModelsByDisplayName(config, ungroupedModels) }] : channelGroups;
     }, [config, options]);
     const current = value || "";
-    const currentPrice = modelMenuPrice(config, current);
+    const resolvedCurrent = resolveCompatibleModel(config, current, requirements) || current;
+    const currentPrice = modelMenuPrice(config, resolvedCurrent);
     const creationVariant = variant === "creation";
 
     useEffect(() => {
@@ -59,6 +67,19 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
         window.addEventListener("model-picker-open", closeOtherPicker);
         return () => window.removeEventListener("model-picker-open", closeOtherPicker);
     }, [pickerId]);
+
+    useEffect(() => {
+        if (!open) return;
+        // 画布拖拽从 pointerdown 开始，须在捕获阶段关闭 Portal 菜单，避免菜单与触发器分离。
+        const closeOnOutsidePointer = (event: PointerEvent) => {
+            const target = event.target;
+            if (!(target instanceof Node)) return;
+            if (triggerRef.current?.contains(target) || menuRef.current?.contains(target)) return;
+            setOpen(false);
+        };
+        window.addEventListener("pointerdown", closeOnOutsidePointer, true);
+        return () => window.removeEventListener("pointerdown", closeOnOutsidePointer, true);
+    }, [open]);
 
     const setPickerOpen = (nextOpen: boolean) => {
         if (nextOpen && !options.length && config.channelMode === "local") onMissingConfig?.();
@@ -97,7 +118,7 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
         <div
             ref={menuRef}
             data-canvas-no-zoom
-            className={cn("canvas-model-picker-menu max-w-[calc(100vw-24px)]", creationVariant ? "creation-model-picker-menu w-[360px]" : "w-[320px]")}
+            className={cn("canvas-model-picker-menu max-w-[calc(100vw-24px)]", creationVariant ? "creation-model-picker-menu w-[360px]" : "w-[var(--panel-width-compact)]")}
             style={{ background: theme.node.panel, color: theme.node.text }}
             role="listbox"
             aria-label={placeholder}
@@ -105,47 +126,63 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
             onMouseDown={(event) => event.stopPropagation()}
             onPointerDown={(event) => event.stopPropagation()}
         >
-            {creationVariant ? <div className="creation-model-picker-heading"><span>选择模型</span>{current ? <strong>{modelDisplayName(config, current)}</strong> : null}</div> : null}
-            {optionGroups.length ? optionGroups.map((group) => (
-                <section key={group.key} className="canvas-model-picker-group min-w-0 overflow-hidden">
-                    <div className="canvas-model-picker-group-label" style={{ color: theme.node.muted }}>
-                        <span className="truncate">{group.label}</span>
-                        <span className="shrink-0" style={{ color: theme.node.muted }}>{group.scope}</span>
-                    </div>
-                    <div className="grid min-w-0 gap-1">
-                        {group.models.map((model) => {
-                            const selected = model === current;
-                            return (
-                                <button
-                                    key={model}
-                                    type="button"
-                                    role="option"
-                                    aria-selected={selected}
-                                    className="canvas-model-picker-option"
-                                    style={{ background: selected ? theme.toolbar.activeBg : "transparent", color: theme.node.text }}
-                                    onClick={() => {
-                                        onChange(model);
-                                        setOpen(false);
-                                        window.requestAnimationFrame(() => triggerRef.current?.focus());
-                                    }}
-                                >
-                                    <ModelLabel config={config} model={model} capability={capability} theme={theme} creationVariant={creationVariant} />
-                                    {selected ? <Check className="canvas-model-picker-option-check" style={{ color: theme.node.activeStroke }} /> : null}
-                                </button>
-                            );
-                        })}
-                    </div>
-                </section>
-            )) : <div className="canvas-model-picker-empty" style={{ color: theme.node.muted }}>{emptyModelLabel(config, capability)}</div>}
+            {creationVariant ? (
+                <div className="creation-model-picker-heading">
+                    <span>选择模型</span>
+                    {current ? <strong>{modelDisplayName(config, current)}</strong> : null}
+                </div>
+            ) : null}
+            {optionGroups.length ? (
+                optionGroups.map((group) => (
+                    <section key={group.key} className="canvas-model-picker-group min-w-0 overflow-hidden">
+                        <div className="canvas-model-picker-group-label" style={{ color: theme.node.muted }}>
+                            <span className="truncate">{group.label}</span>
+                            <span className="shrink-0" style={{ color: theme.node.muted }}>
+                                {group.scope}
+                            </span>
+                        </div>
+                        <div className="grid min-w-0 gap-1">
+                            {group.models.map((modelGroup) => {
+                                const selected = modelGroup.models.includes(current);
+                                const model = compatibleModelInGroup(config, modelGroup.models, requirements, selected ? current : undefined);
+                                const displayModel = model || (selected ? current : modelGroup.models[0]);
+                                const disabledReason = model ? "" : modelCompatibilityError(config, modelGroup.models[0], requirements) || "当前输入不符合该模型能力";
+                                return (
+                                    <button
+                                        key={modelGroup.key}
+                                        type="button"
+                                        role="option"
+                                        aria-selected={selected}
+                                        aria-disabled={Boolean(disabledReason)}
+                                        disabled={Boolean(disabledReason)}
+                                        title={disabledReason || modelOptionLabel(config, displayModel)}
+                                        className="canvas-model-picker-option disabled:cursor-not-allowed disabled:opacity-45"
+                                        style={{ background: selected ? theme.toolbar.activeBg : "transparent", color: theme.node.text }}
+                                        onClick={() => {
+                                            if (!model) return;
+                                            onChange(model);
+                                            setOpen(false);
+                                            window.requestAnimationFrame(() => triggerRef.current?.focus());
+                                        }}
+                                    >
+                                        <ModelLabel config={config} model={displayModel} capability={capability} theme={theme} creationVariant={creationVariant} showPrice={creditsEnabled} disabledReason={disabledReason} />
+                                        {selected ? <Check className="canvas-model-picker-option-check" style={{ color: theme.node.activeStroke }} /> : null}
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    </section>
+                ))
+            ) : (
+                <div className="canvas-model-picker-empty" style={{ color: theme.node.muted }}>
+                    {emptyModelLabel(config, capability)}
+                </div>
+            )}
         </div>
     );
 
     return (
-        <div
-            className={cn(fullWidth ? "w-full min-w-0" : "w-fit max-w-full")}
-            onMouseDown={(event) => event.stopPropagation()}
-            onPointerDown={(event) => event.stopPropagation()}
-        >
+        <div className={cn(fullWidth ? "w-full min-w-0" : "w-fit max-w-full")} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
             <Popover
                 open={open}
                 onOpenChange={setPickerOpen}
@@ -170,9 +207,11 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
                     onKeyDown={handleTriggerKeyDown}
                 >
                     <span className="canvas-model-picker-label flex min-w-0 items-center gap-1.5">
-                        <span className="canvas-model-picker-trigger-icon" style={{ background: theme.toolbar.itemHover }}><ModelIcon model={current} /></span>
-                        <span className="min-w-0 flex-1 truncate">{current ? creationVariant ? modelDisplayName(config, current) : modelOptionLabel(config, current) : placeholder}</span>
-                        {showSelectedPrice ? <ModelPrice price={currentPrice} compact /> : null}
+                        <span className="canvas-model-picker-trigger-icon" style={{ background: theme.toolbar.itemHover }}>
+                            <ModelIcon model={current} />
+                        </span>
+                        <span className="min-w-0 flex-1 truncate">{current ? (creationVariant ? modelDisplayName(config, current) : modelOptionLabel(config, current)) : placeholder}</span>
+                        {showSelectedPrice && creditsEnabled ? <ModelPrice price={currentPrice} compact /> : null}
                     </span>
                     <ChevronDown className={cn("canvas-model-picker-chevron", open && "is-open")} aria-hidden="true" />
                 </button>
@@ -187,8 +226,26 @@ function emptyModelLabel(config: AiConfig, capability?: ModelCapability) {
     return config.models.length ? `暂无匹配的${label}模型` : "请先到配置里添加渠道和模型";
 }
 
-function ModelLabel({ config, model, capability, theme, creationVariant }: { config: AiConfig; model: string; capability?: ModelCapability; theme: (typeof canvasThemes)[keyof typeof canvasThemes]; creationVariant: boolean }) {
+function ModelLabel({
+    config,
+    model,
+    capability,
+    theme,
+    creationVariant,
+    showPrice,
+    disabledReason,
+}: {
+    config: AiConfig;
+    model: string;
+    capability?: ModelCapability;
+    theme: (typeof canvasThemes)[keyof typeof canvasThemes];
+    creationVariant: boolean;
+    showPrice: boolean;
+    disabledReason?: string;
+}) {
     const meta = modelMenuMeta(model, capability);
+    const videoProfile = capability === "video" ? modelCapabilityConfigFor(config, model).video : undefined;
+    const capabilitySummary = disabledReason || (videoProfile ? `${formatDurationSummary(videoProfile)} · ${videoProfile.resolutions.map((item) => item.toUpperCase()).join("/")}` : meta.description);
     return (
         <span className="flex w-full min-w-0 items-center gap-1.5 overflow-hidden py-0">
             <span className="grid size-6 shrink-0 place-items-center rounded-md" style={{ background: theme.toolbar.itemHover }}>
@@ -196,12 +253,24 @@ function ModelLabel({ config, model, capability, theme, creationVariant }: { con
             </span>
             <span className="min-w-0 flex-1 overflow-hidden">
                 <span className="block min-w-0 truncate text-[var(--fs-label)] font-medium leading-none">{modelDisplayName(config, model)}</span>
-                <span className="mt-1 block truncate text-[var(--fs-tiny)]" style={{ color: theme.node.muted }} title={meta.description}>{meta.description}</span>
+                <span className="mt-1 block truncate text-[var(--fs-tiny)]" style={{ color: theme.node.muted }} title={capabilitySummary}>
+                    {capabilitySummary}
+                </span>
             </span>
-            <ModelPrice price={modelMenuPrice(config, model)} />
-            {!creationVariant && meta.time ? <span className="shrink-0 rounded-full px-1.5 py-0.5 text-[var(--fs-tiny)] tabular-nums" style={{ background: theme.toolbar.itemHover, color: theme.node.muted }}>{meta.time}</span> : null}
+            {showPrice ? <ModelPrice price={modelMenuPrice(config, model)} /> : null}
+            {!creationVariant && meta.time ? (
+                <span className="shrink-0 rounded-full px-1.5 py-0.5 text-[var(--fs-tiny)] tabular-nums" style={{ background: theme.toolbar.itemHover, color: theme.node.muted }}>
+                    {meta.time}
+                </span>
+            ) : null}
         </span>
     );
+}
+
+function formatDurationSummary(profile: NonNullable<ReturnType<typeof modelCapabilityConfigFor>["video"]>) {
+    const values = videoDurationOptions(profile);
+    if (profile.duration.selection === "enum") return values.map((item) => `${item}s`).join("/");
+    return `${profile.duration.min || values[0]}-${profile.duration.max || values[values.length - 1]}s`;
 }
 
 function modelMenuPrice(config: AiConfig, model: string): { value: number; unit: "次" | "秒" } | null | undefined {
@@ -246,23 +315,15 @@ function modelMenuMeta(model: string, capability?: ModelCapability): { descripti
 
 export function ModelIcon({ model }: { model: string }) {
     const icon = resolveModelIcon(modelOptionName(model));
-    return icon ? <img src={icon} alt="" className="size-3.5 shrink-0 dark:invert" /> : <Cpu className="size-3.5 shrink-0 opacity-70" />;
+    const monochrome = icon === "/icons/openai.svg" || icon === "/icons/grok.svg";
+    return icon ? <img src={icon} alt="" className={cn("size-3.5 shrink-0", monochrome && "dark:invert")} /> : <Cpu className="size-3.5 shrink-0 opacity-70" />;
 }
 
 export function resolveModelIcon(model: string) {
     const name = model.toLowerCase();
     if (name.includes("claude") || name.includes("anthropic")) return "/icons/claude.svg";
     // Flow2API 短名：Nano Banana / Imagen / Veo / Omni 均属 Google Gemini 系。
-    if (
-        name.includes("gemini") ||
-        name.includes("google") ||
-        name.includes("nano banana") ||
-        name.includes("nanobanana") ||
-        name.includes("imagen") ||
-        name.includes("veo") ||
-        name.includes("omni flash") ||
-        name.includes("omni-flash")
-    ) {
+    if (name.includes("gemini") || name.includes("google") || name.includes("nano banana") || name.includes("nanobanana") || name.includes("imagen") || name.includes("veo") || name.includes("omni flash") || name.includes("omni-flash")) {
         return "/icons/gemini.svg";
     }
     if (name.includes("gpt") || name.includes("openai") || name.includes("dall-e") || name.includes("dalle")) return "/icons/openai.svg";

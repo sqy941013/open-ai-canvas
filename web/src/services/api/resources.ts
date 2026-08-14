@@ -1,7 +1,6 @@
-import axios from "axios";
-
 import { getActiveUserScope } from "@/lib/user-scope";
-import type { BackendEnvelope } from "@/services/api/task-center";
+import axios from "axios";
+import { apiBaseURL, apiClient, request, type BackendEnvelope } from "@/services/api/request";
 
 export type RemoteResource = {
     id: string;
@@ -26,7 +25,7 @@ export type RemoteResource = {
 
 export type UserOSSSetting = {
     enabled: boolean;
-    provider: "aliyun";
+    provider: "aliyun" | "tencent";
     region: string;
     endpoint: string;
     bucket: string;
@@ -41,17 +40,10 @@ export type UserOSSSettingInput = Pick<UserOSSSetting, "enabled" | "provider" | 
     accessKeySecret?: string;
 };
 
-const apiBaseURL = import.meta.env.VITE_CANVAS_BACKEND_URL || "/api";
-const api = axios.create({ baseURL: apiBaseURL, withCredentials: true });
+const api = apiClient;
 const resourceCache = new Map<string, RemoteResource>();
 const resourceRequests = new Map<string, Promise<RemoteResource>>();
 const missingResourceIds = new Set<string>();
-
-async function request<T>(promise: Promise<{ data: BackendEnvelope<T> }>) {
-    const response = await promise;
-    if (response.data.code !== 0) throw new Error(response.data.msg || "请求失败");
-    return response.data.data;
-}
 
 export function resourceStorageKey(id: string) {
     return `resource:${id}`;
@@ -120,10 +112,10 @@ export async function getResourceOSSUrl(storageKey?: string) {
     if (!id) throw new Error("当前媒体尚未上传到后端资源存储");
     try {
         const data = await request<{ url: string }>(api.get(`/resources/${encodeURIComponent(id)}/oss-url`));
-        if (!data.url) throw new Error("后端未返回 OSS 地址");
+        if (!data.url) throw new Error("后端未返回对象存储地址");
         return data.url;
     } catch (error) {
-        if (axios.isAxiosError<BackendEnvelope<unknown>>(error)) throw new Error(error.response?.data.msg || error.message || "获取 OSS 地址失败");
+        if (axios.isAxiosError<BackendEnvelope<unknown>>(error)) throw new Error(error.response?.data.msg || error.message || "获取对象存储地址失败");
         throw error;
     }
 }

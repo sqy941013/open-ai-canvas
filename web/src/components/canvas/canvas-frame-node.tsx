@@ -156,19 +156,17 @@ export const CanvasFrameNode = React.memo(function CanvasFrameNode({
             onMouseEnter={() => onHoverStart?.(data.id)}
             onMouseLeave={() => onHoverEnd?.(data.id)}
         >
+            {/* 帧节点同样禁用指针跟随 3D 位移，hover 使用 CSS 静态抬升 */}
             <CometCard
                 containerClassName="h-full w-full"
                 className="canvas-frame-shell overflow-hidden rounded-[var(--dock-radius)] border"
-                rotateDepth={2.4}
-                translateDepth={2}
-                disabled={Boolean(dragOffset) || !collapsed || editing || scale < 0.32}
-                glare={collapsed}
+                disabled
+                data-canvas-frame-hover-locked={!collapsed || editing || Boolean(dragOffset) || scale < 0.32 ? "true" : "false"}
                 style={{
                     background: active ? theme.frame.activeFill : theme.frame.fill,
                     borderColor: active ? theme.frame.activeStroke : theme.frame.stroke,
                     borderWidth: 1 / Math.max(scale, 0.05),
                     boxShadow: isSelected ? `0 0 0 ${1 / Math.max(scale, 0.05)}px ${theme.frame.activeStroke}33, 0 24px 72px ${theme.spatial.shadow}` : `0 18px 54px ${theme.spatial.shadow}`,
-                    transition: "background-color 120ms ease-out, border-color 120ms ease-out",
                 }}
             >
                 <div className="pointer-events-auto absolute inset-x-0 top-0 z-10 flex items-center gap-1.5 px-1.5" style={{ height: FRAME_HEADER_HEIGHT, color: theme.node.text }}>
@@ -263,12 +261,12 @@ function FramePreview({ nodes, frame, theme }: { nodes: CanvasNodeData[]; frame:
         <div className="pointer-events-none absolute inset-x-2 bottom-2 overflow-hidden rounded-md" style={{ top: FRAME_HEADER_HEIGHT, background: theme.frame.preview }}>
             {layout.length ? (
                 layout.map(({ node, ...style }) => (
-                    <div key={node.id} className="absolute overflow-hidden rounded-[3px] border" style={{ ...style, background: theme.node.fill, borderColor: theme.node.stroke }}>
+                    <div key={node.id} className="absolute overflow-hidden rounded-[var(--r-xs)] border" style={{ ...style, background: theme.node.fill, borderColor: theme.node.stroke }}>
                         {node.type === CanvasNodeType.Image && node.metadata?.content ? <img src={node.metadata.content} alt="" className="h-full w-full object-cover" loading="lazy" decoding="async" draggable={false} /> : null}
                         {node.type === CanvasNodeType.Video && node.metadata?.content ? <video src={node.metadata.content} className="h-full w-full object-cover" muted playsInline preload="metadata" /> : null}
                         {node.type === CanvasNodeType.Video && !node.metadata?.content ? <Video className="m-auto size-4 h-full opacity-40" /> : null}
-                        {node.type === CanvasNodeType.Text ? <div className="line-clamp-3 p-1 text-[7px] leading-[9px]" style={{ color: theme.node.text }}>{node.metadata?.content || node.title}</div> : null}
-                        {node.type === CanvasNodeType.Script ? <div className="p-1 text-[7px] leading-[9px]" style={{ color: theme.node.text }}>分镜脚本 · {node.metadata?.storyboard?.rows.length || 0} 镜</div> : null}
+                        {node.type === CanvasNodeType.Text ? <div className="line-clamp-3 p-1 text-[var(--fs-nano)] leading-[9px]" style={{ color: theme.node.text }}>{node.metadata?.content || node.title}</div> : null}
+                        {node.type === CanvasNodeType.Script ? <div className="p-1 text-[var(--fs-nano)] leading-[9px]" style={{ color: theme.node.text }}>分镜脚本 · {node.metadata?.storyboard?.rows.length || 0} 镜</div> : null}
                     </div>
                 ))
             ) : (

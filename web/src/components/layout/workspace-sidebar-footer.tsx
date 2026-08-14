@@ -1,5 +1,5 @@
 import { App, Popover, Switch } from "antd";
-import { ChevronRight, LogIn, LogOut, Moon, ShieldCheck, Sun, UserRound } from "lucide-react";
+import { ChevronRight, CircleUserRound, LogIn, LogOut, Moon, ShieldCheck, Sun } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router";
 
@@ -17,17 +17,19 @@ type WorkspaceSidebarFooterProps = {
     expandedClassName: string;
     collapsedClassName: string;
     accountClassName: string;
+    showAnnouncement?: boolean;
 };
 
-export function WorkspaceSidebarFooter({ expandedClassName, collapsedClassName, accountClassName }: WorkspaceSidebarFooterProps) {
+export function WorkspaceSidebarFooter({ expandedClassName, collapsedClassName, accountClassName, showAnnouncement = true }: WorkspaceSidebarFooterProps) {
     const theme = useThemeStore((state) => state.theme);
     const setTheme = useThemeStore((state) => state.setTheme);
     const user = useUserStore((state) => state.user);
     const hydrated = useUserStore((state) => state.hydrated);
+    const creditsEnabled = useUserStore((state) => state.features.creditsEnabled);
     const navigate = useNavigate();
     const { message } = App.useApp();
     const [menuOpen, setMenuOpen] = useState(false);
-    const { availableMicrocredits } = useWalletBalance(user?.id, true);
+    const { availableMicrocredits } = useWalletBalance(user?.id, creditsEnabled);
     const balance = availableMicrocredits === null
         ? "--"
         : (availableMicrocredits / 1_000_000).toLocaleString("zh-CN", { maximumFractionDigits: 2 });
@@ -48,10 +50,10 @@ export function WorkspaceSidebarFooter({ expandedClassName, collapsedClassName, 
 
     return (
         <div>
-            {user ? (
+            {user && showAnnouncement ? (
                 <SystemAnnouncementCenter
                     userId={user.id}
-                    className={cn("relative mb-1 flex h-9 w-full items-center rounded-md text-xs text-foreground/55 transition-colors hover:bg-foreground/[.05] hover:text-foreground", collapsedClassName)}
+                    className={cn("relative mb-1 flex h-9 w-full items-center rounded-md text-xs text-foreground/55 transition-colors hover:bg-surface-hover hover:text-foreground", collapsedClassName)}
                     showLabel
                     labelClassName={expandedClassName}
                     staticMotion
@@ -69,7 +71,7 @@ export function WorkspaceSidebarFooter({ expandedClassName, collapsedClassName, 
                                 <UserAvatar user={user} className="size-8" />
                                 <div className="min-w-0 flex-1">
                                     <div className="flex min-w-0 items-center gap-1.5"><span className="truncate text-sm font-medium">{user.displayName || user.username}</span><IdentityProviderBadge user={user} /></div>
-                                    <div className="mt-0.5 truncate text-[var(--fs-label)] tabular-nums text-foreground/45">可用 {balance} 积分</div>
+                                    {creditsEnabled ? <div className="mt-0.5 truncate text-[var(--fs-label)] tabular-nums text-foreground/45">可用 {balance} 积分</div> : null}
                                 </div>
                             </div>
 
@@ -80,7 +82,7 @@ export function WorkspaceSidebarFooter({ expandedClassName, collapsedClassName, 
                             ) : null}
 
                             <div className="border-y border-border/65 py-2">
-                                <AppChangelogButton className="flex h-8 w-full items-center gap-2 rounded px-2 text-[var(--fs-label)] text-foreground/58 hover:bg-foreground/[.055] hover:text-foreground [&_svg]:size-3.5" showLabel showVersion versionClassName="ml-auto text-[var(--fs-micro)] tabular-nums text-foreground/32" />
+                                <AppChangelogButton className="flex h-8 w-full items-center gap-2 rounded px-2 text-[var(--fs-label)] text-foreground/58 hover:bg-surface-hover hover:text-foreground [&_svg]:size-3.5" showLabel showVersion versionClassName="ml-auto text-[var(--fs-micro)] tabular-nums text-foreground/32" />
                             </div>
 
                             <div className="flex h-10 items-center px-2">
@@ -88,21 +90,21 @@ export function WorkspaceSidebarFooter({ expandedClassName, collapsedClassName, 
                                 <span className="ml-2 flex-1 text-xs text-foreground/65">深色模式</span>
                                 <Switch size="small" checked={theme === "dark"} onChange={(checked) => setTheme(checked ? "dark" : "light")} aria-label="深色模式" />
                             </div>
-                            <button type="button" className="flex h-9 w-full items-center gap-2 rounded px-2 text-xs text-foreground/55 hover:bg-foreground/[.055] hover:text-foreground" onClick={() => void handleLogout()}><LogOut className="size-3.5" />退出登录</button>
+                            <button type="button" className="flex h-9 w-full items-center gap-2 rounded px-2 text-xs text-foreground/55 hover:bg-surface-hover hover:text-foreground" onClick={() => void handleLogout()}><LogOut className="size-3.5" />退出登录</button>
                         </div>
                     )}
                 >
-                    <button type="button" className={cn("flex min-h-10 w-full min-w-0 items-center overflow-hidden rounded-md text-left transition-colors hover:bg-foreground/[.045]", accountClassName)} title={`${user.displayName || user.username} · ${balance} 积分`}>
+                    <button type="button" className={cn("app-workspace-account-button flex min-h-10 w-full min-w-0 items-center overflow-hidden rounded-md text-left transition-colors hover:bg-surface-hover", accountClassName)} title={creditsEnabled ? `${user.displayName || user.username} · ${balance} 积分` : user.displayName || user.username}>
                         <UserAvatar user={user} className="size-7" />
                         <span className={cn("min-w-0 flex-1 flex-col", expandedClassName)}>
                             <span className="truncate text-xs font-medium">{user.displayName || user.username}</span>
-                            <span className="mt-0.5 block truncate text-[var(--fs-micro)] tabular-nums text-foreground/42">{balance} 积分</span>
+                            {creditsEnabled ? <span className="mt-0.5 block truncate text-[var(--fs-micro)] tabular-nums text-foreground/42">{balance} 积分</span> : null}
                         </span>
                         <ChevronRight className={cn("size-3.5 shrink-0 text-foreground/30", expandedClassName)} />
                     </button>
                 </Popover>
             ) : (
-                <Link to="/login" className={cn("flex h-10 items-center rounded-md text-xs text-foreground/65 hover:bg-foreground/[.05] hover:text-foreground", collapsedClassName)} title="登录">
+                <Link to="/login" className={cn("flex h-10 items-center rounded-md text-xs text-foreground/65 hover:bg-surface-hover hover:text-foreground", collapsedClassName)} title="登录">
                     <LogIn className="size-4 shrink-0" /><span className={expandedClassName}>登录</span>
                 </Link>
             )}
@@ -111,7 +113,7 @@ export function WorkspaceSidebarFooter({ expandedClassName, collapsedClassName, 
 }
 
 function MenuLink({ to, icon, label, onNavigate }: { to: string; icon: ReactNode; label: string; onNavigate: () => void }) {
-    return <Link to={to} onClick={onNavigate} className="flex h-9 items-center gap-2.5 rounded px-2 text-xs text-foreground/62 hover:bg-foreground/[.055] hover:text-foreground [&_svg]:size-3.5 [&_svg]:shrink-0">{icon}<span className="flex-1">{label}</span><ChevronRight className="!size-3 text-foreground/25" /></Link>;
+    return <Link to={to} onClick={onNavigate} className="flex h-9 items-center gap-2.5 rounded px-2 text-xs text-foreground/62 hover:bg-surface-hover hover:text-foreground [&_svg]:size-3.5 [&_svg]:shrink-0">{icon}<span className="flex-1">{label}</span><ChevronRight className="!size-3 text-foreground/25" /></Link>;
 }
 
 function UserAvatar({ user, className }: { user: LocalUser; className: string }) {
@@ -122,11 +124,11 @@ function UserAvatar({ user, className }: { user: LocalUser; className: string })
 
     return (
         <span className={`relative grid shrink-0 place-items-center ${className}`}>
-            <span className="grid size-full place-items-center overflow-hidden rounded-full bg-muted text-foreground/55">
+            <span className="grid size-full place-items-center overflow-hidden rounded-md bg-transparent text-foreground/55">
                 {avatarUrl && !failed ? (
                     <img src={avatarUrl} alt="" referrerPolicy="no-referrer" className="size-full object-cover" onError={() => setFailed(true)} />
                 ) : (
-                    <UserRound className="size-[52%]" aria-hidden />
+                    <CircleUserRound className="app-workspace-account-icon" aria-hidden />
                 )}
             </span>
             <IdentityProviderBadge user={user} compact className="absolute -bottom-1 -right-1" />

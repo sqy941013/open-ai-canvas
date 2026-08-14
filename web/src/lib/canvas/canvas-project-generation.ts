@@ -1,12 +1,14 @@
 import { type GenerationTask } from "@/services/api/task-center";
 import { backendProviderConfig, runBackendGenerationTask } from "@/services/api/generation-task";
-import { configuredModelMatchesCapability, defaultConfig, resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
+import { defaultConfig, modelMatchesCapability, modelOptionName, normalizeModelOptionValue, resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { resolveMediaUrl } from "@/services/file-storage";
 import { resourceIdFromStorageKey } from "@/services/api/resources";
 import { NODE_DEFAULT_SIZE } from "@/constant/canvas";
 import { normalizeVideoDuration, normalizeVideoResolution } from "@/lib/video-generation-options";
 import { isSeedanceVideoConfig } from "@/lib/seedance-video";
+import { modelCapabilityConfigFor, normalizeImageValue } from "@/lib/model-capabilities";
+import { resolveCompatibleModel, resolveVideoOperation, type ModelRequirements } from "@/lib/model-selection";
 import { imageMetadata } from "@/lib/canvas/canvas-generation-task-sync";
 import { ensureMediaNodeMinimumSize } from "@/lib/canvas/canvas-node-size";
 import type { CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
@@ -41,12 +43,13 @@ export async function runBackendCanvasGenerationTask({
     metadata?: Record<string, unknown>;
     onTaskCreated?: (task: GenerationTask) => void;
 }) {
+    const normalizedReferenceImages = mode === "image" ? limitCanvasImageReferences(config, referenceImages) : referenceImages;
     return runBackendGenerationTask({
         projectId,
         mode,
         prompt,
         config,
-        referenceImages,
+        referenceImages: normalizedReferenceImages,
         referenceVideos,
         referenceAudios,
         mask,
@@ -54,6 +57,14 @@ export async function runBackendCanvasGenerationTask({
         metadata: { nodeId, ...(mode === "video" && !metadata?.videoEditOperation ? { videoEditOperation: "image_to_video" } : {}), ...metadata },
         onTaskUpdate: onTaskCreated,
     });
+}
+
+// Canvas references can include a scene frame plus multiple character turnarounds. Keep
+// the earliest connected scene image when a provider accepts fewer images than the graph.
+export function limitCanvasImageReferences(config: AiConfig, referenceImages: ReferenceImage[]) {
+    const maxImages = modelCapabilityConfigFor(config, config.model).image?.references.maxImages;
+    if (maxImages === undefined || maxImages < 1 || referenceImages.length <= maxImages) return referenceImages;
+    return referenceImages.slice(0, maxImages);
 }
 
 export { backendProviderConfig };
@@ -192,13 +203,14 @@ function resolveVideoEditOperation(
     },
 ): CanvasVideoEditOperation {
     const storedOperation = node?.metadata?.videoEditOperation;
-    // 连接关系是生成时的真实输入，不能让分镜节点残留的文生视频模式丢弃后来连接的参考图。
-    if (storedOperation === "text_to_video" && context?.referenceImages.length) return "image_to_video";
-    if (storedOperation) return storedOperation;
-    if (context?.referenceAudios.length && !context.referenceImages.length && !context.referenceVideos.length) return "audio_to_video";
-    if (context?.referenceVideos.length) return "extend";
-    if (context?.referenceImages.length) return "image_to_video";
-    return "image_to_video";
+    const input = {
+        textCount: 0,
+        imageCount: context?.referenceImages.length || 0,
+        videoCount: context?.referenceVideos.length || 0,
+        audioCount: context?.referenceAudios.length || 0,
+        characterCount: 0,
+    };
+    return resolveVideoOperation(input, storedOperation) as CanvasVideoEditOperation;
 }
 
 export function buildVideoGenerationMetadata(
@@ -274,17 +286,20 @@ export function getGenerationCount(count: string) {
 }
 
 
-export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | undefined, mode: CanvasNodeGenerationMode): AiConfig {
+export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | undefined, mode: CanvasNodeGenerationMode, requirements?: ModelRequirements): AiConfig {
     const defaultModel = mode === "image" ? config.imageModel : mode === "video" ? config.videoModel : mode === "audio" ? config.audioModel : config.textModel;
     const fallbackModel = mode === "image" ? defaultConfig.imageModel : mode === "video" ? defaultConfig.videoModel : mode === "audio" ? defaultConfig.audioModel : defaultConfig.textModel;
-    const storedModel = node?.metadata?.model;
-    const model = storedModel && configuredModelMatchesCapability(config, storedModel, mode) ? storedModel : defaultModel && configuredModelMatchesCapability(config, defaultModel, mode) ? defaultModel : fallbackModel;
+    const storedModel = resolveCanvasGenerationModel(config, node?.metadata?.model, mode);
+    const preferredModel = storedModel || resolveCanvasGenerationModel(config, defaultModel, mode) || fallbackModel;
+    const model = resolveCompatibleModel(config, preferredModel, requirements) || preferredModel;
+    const imageProfile = mode === "image" ? modelCapabilityConfigFor(config, model).image! : undefined;
+    const normalizedImage = imageProfile ? normalizeImageValue(imageProfile, { quality: node?.metadata?.quality || config.quality || defaultConfig.quality, size: node?.metadata?.size || config.size || defaultConfig.size, transparentBackground: node?.metadata?.transparentBackground || config.transparentBackground, count: String(node?.metadata?.count || config.canvasImageCount || config.count || defaultConfig.count) }) : undefined;
     return {
         ...config,
         model,
-        quality: node?.metadata?.quality || config.quality || defaultConfig.quality,
-        size: node?.metadata?.size || config.size || defaultConfig.size,
-        transparentBackground: (node?.metadata?.transparentBackground || config.transparentBackground) === "true" ? "true" : "false",
+        quality: normalizedImage?.quality || node?.metadata?.quality || config.quality || defaultConfig.quality,
+        size: normalizedImage?.size || node?.metadata?.size || config.size || defaultConfig.size,
+        transparentBackground: normalizedImage?.transparentBackground || ((node?.metadata?.transparentBackground || config.transparentBackground) === "true" ? "true" : "false"),
         videoSeconds: normalizeVideoDuration(node?.metadata?.seconds || config.videoSeconds || defaultConfig.videoSeconds),
         vquality: normalizeVideoResolution(node?.metadata?.vquality || config.vquality || defaultConfig.vquality),
         videoGenerateAudio: node?.metadata?.generateAudio || config.videoGenerateAudio || defaultConfig.videoGenerateAudio,
@@ -293,8 +308,15 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
         audioFormat: node?.metadata?.audioFormat || config.audioFormat || defaultConfig.audioFormat,
         audioSpeed: node?.metadata?.audioSpeed || config.audioSpeed || defaultConfig.audioSpeed,
         audioInstructions: node?.metadata?.audioInstructions || config.audioInstructions || defaultConfig.audioInstructions,
-        count: String(node?.metadata?.count || (mode === "image" ? config.canvasImageCount || config.count : config.count) || defaultConfig.count),
+        count: normalizedImage?.count || String(node?.metadata?.count || (mode === "image" ? config.canvasImageCount || config.count : config.count) || defaultConfig.count),
     };
+}
+
+export function resolveCanvasGenerationModel(config: AiConfig, model: string | undefined, mode: CanvasNodeGenerationMode): string {
+    if (!model) return "";
+    const normalized = normalizeModelOptionValue(model, config.channels);
+    if (!normalized) return "";
+    return modelMatchesCapability(modelOptionName(normalized), mode) ? normalized : "";
 }
 
 export function supportsVideoReferenceAudio(config: AiConfig) {
