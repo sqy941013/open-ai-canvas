@@ -1,0 +1,42 @@
+---
+title: NewAPI 视频 multipart 协议
+---
+
+# NewAPI 视频 multipart 协议
+
+影策的 `newapi` 协议使用 OpenAI / NewAPI Videos 风格的异步接口：
+
+- 创建任务：`POST /v1/videos`
+- 查询任务：`GET /v1/videos/{task_id}`
+- 请求类型：`multipart/form-data`
+
+## 请求字段
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `model` | text | 模型标识 |
+| `prompt` | text | 视频提示词 |
+| `seconds` | text | 输出时长 |
+| `size` | text | 输出比例或尺寸 |
+| `resolution_name` | text | 输出分辨率 |
+| `generate_audio` | boolean text | 模型能力开启时控制是否生成音轨 |
+| `input_reference[]` | file[] | 参考图片 |
+| `input_video[]` | file[] | 模型能力开启时上传参考视频 |
+| `input_audio[]` | file[] | 模型能力开启时上传参考音频 |
+
+参考视频和参考音频不是所有 OpenAI Videos 服务的通用字段。影策默认将对应上限设为 `0`；只有模型能力中的 `maxVideos` 或 `maxAudios` 大于 `0` 时才允许连接并上传，避免把扩展字段发送给不兼容的上游。
+
+`minimax-h3-r2v`、`minimax-h3-r2v-sage` 和 `minimax-h3-r2v-tespeed` 使用 ComfyUI 网关扩展合同，默认最多接受 3 个参考视频和 3 个参考音频。视频单文件上限 50 MB，音频单文件上限 15 MB，参考时长上限 15 秒，并默认支持生成音轨。
+
+## 本地素材链路
+
+前端先按资源存储合同把本地图片、视频和音频保存为登录用户资源。后端校验资源归属后读取文件，并在创建上游任务时写入 multipart；浏览器不会直接向自定义渠道暴露 API Key。
+
+这一协议不要求参考素材预先具有公网 URL，适合影策和 ComfyUI 网关位于同一局域网的部署。若选择 `newapi-channel-2` JSON 协议，则 `image_urls`、`video_urls` 和 `audio_urls` 仍必须是上游可以访问的 HTTP(S) 地址。
+
+## 兼容边界
+
+- 普通 `newapi` 模型仍只开启参考图片，不会自动获得视频或音频输入能力。
+- 数量、文件大小和时长先由模型能力校验，再由协议适配器组装请求；写路径失败会明确返回错误。
+- `generate_audio` 表示生成结果是否包含音轨，与上传 `input_audio[]` 参考音频是两个独立能力。
+- 删除画布节点或素材不会自动删除 OSS 远端对象。

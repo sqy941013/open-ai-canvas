@@ -173,7 +173,14 @@ func DefaultModelCapabilityConfigForModel(protocol string, modelName string) *Mo
 		video.References.MaxVideoBytes, video.References.MaxAudioBytes = 200*1024*1024, 15*1024*1024
 		video.References.MaxVideoDuration, video.References.MaxAudioDuration = 15, 15
 		video.GenerateAudio = VideoBooleanConfig{Supported: true, Default: true}
-	case model.ChannelInterfaceNewAPIVideo, model.ChannelInterfaceXAIVideo:
+	case model.ChannelInterfaceNewAPIVideo:
+		if isMiniMaxH3MultipartVideoModel(modelName) {
+			video.References.MaxVideos, video.References.MaxAudios = 3, 3
+			video.References.MaxVideoBytes, video.References.MaxAudioBytes = 50*1024*1024, 15*1024*1024
+			video.References.MaxVideoDuration, video.References.MaxAudioDuration = 15, 15
+			video.GenerateAudio = VideoBooleanConfig{Supported: true, Default: true}
+		}
+	case model.ChannelInterfaceXAIVideo:
 		video.GenerateAudio = VideoBooleanConfig{Supported: false, Default: false}
 	case model.ChannelInterfaceNovitaVideo:
 		video.References.MaxImages, video.References.MaxImageBytes = 1, 10*1024*1024
@@ -183,6 +190,11 @@ func DefaultModelCapabilityConfigForModel(protocol string, modelName string) *Mo
 		video.DefaultResolution = "1080p"
 	}
 	return &ModelCapabilityConfig{Version: 1, Image: DefaultImageCapabilityConfig(protocol, modelName), Video: video}
+}
+
+func isMiniMaxH3MultipartVideoModel(modelName string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(modelName, "models/")))
+	return normalized == "minimax-h3-r2v" || strings.HasPrefix(normalized, "minimax-h3-r2v-")
 }
 
 func DecodeModelCapabilityConfig(raw string) (*ModelCapabilityConfig, error) {

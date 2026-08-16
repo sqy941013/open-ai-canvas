@@ -150,10 +150,10 @@ export function defaultModelCapabilityConfig(protocol?: ModelProtocol, model = "
         video.duration = { selection: "enum", values: [4, 6, 8], default: 6 };
         video.resolutions = ["720p", "1080p"];
     }
-    if (protocol === "volcengine-ark-video" || protocol === "newapi-channel-1" || protocol === "newapi-channel-2") {
+    if (protocol === "volcengine-ark-video" || protocol === "newapi-channel-1" || protocol === "newapi-channel-2" || (protocol === "newapi" && isMiniMaxH3MultipartVideoModel(model))) {
         video.references.maxVideos = 3;
         video.references.maxAudios = 3;
-        video.references.maxVideoBytes = 200 * 1024 * 1024;
+        video.references.maxVideoBytes = protocol === "newapi" ? 50 * 1024 * 1024 : 200 * 1024 * 1024;
         video.references.maxAudioBytes = 15 * 1024 * 1024;
         video.references.maxVideoDurationSeconds = 15;
         video.references.maxAudioDurationSeconds = 15;
@@ -169,6 +169,14 @@ export function defaultModelCapabilityConfig(protocol?: ModelProtocol, model = "
         video.defaultResolution = "1080p";
     }
     return { version: 1, image: defaultImageCapabilityConfig(protocol, model), video };
+}
+
+function isMiniMaxH3MultipartVideoModel(model: string) {
+    const normalized = model
+        .trim()
+        .toLowerCase()
+        .replace(/^models\//, "");
+    return normalized === "minimax-h3-r2v" || normalized.startsWith("minimax-h3-r2v-");
 }
 
 export function modelCapabilityConfigFor(config: { channels: Array<{ id: string; models: string[]; modelCosts?: Array<{ model: string; capabilityConfig?: ModelCapabilityConfig; protocol?: ModelProtocol }> }> }, model: string) {

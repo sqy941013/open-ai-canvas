@@ -1,0 +1,15 @@
+---
+title: 待确认功能
+---
+
+# 待确认功能
+
+## NewAPI multipart 参考视频和音频
+
+已实现，等待用户在实际 MiniMax H3 / ComfyUI 工作流中确认：
+
+- [ ] 画布视频节点可同时连接参考图片、参考视频和参考音频。
+- [ ] `minimax-h3-r2v`、`minimax-h3-r2v-sage`、`minimax-h3-r2v-tespeed` 均收到 `input_video[]` 和 `input_audio[]`。
+- [ ] 关闭“生成音频”后 multipart 中的 `generate_audio=false` 生效。
+- [ ] 任务失败重试仍保留原参考视频和参考音频。
+- [ ] 普通 `newapi` 视频模型继续拒绝未声明的视频或音频输入。

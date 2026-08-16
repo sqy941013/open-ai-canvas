@@ -1,12 +1,11 @@
 import { type GenerationTask } from "@/services/api/task-center";
 import { backendProviderConfig, runBackendGenerationTask } from "@/services/api/generation-task";
-import { defaultConfig, modelMatchesCapability, modelOptionName, normalizeModelOptionValue, resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
+import { configuredModelMatchesCapability, defaultConfig, normalizeModelOptionValue, resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { resolveMediaUrl } from "@/services/file-storage";
 import { resourceIdFromStorageKey } from "@/services/api/resources";
 import { NODE_DEFAULT_SIZE } from "@/constant/canvas";
 import { normalizeVideoDuration, normalizeVideoResolution } from "@/lib/video-generation-options";
-import { isSeedanceVideoConfig } from "@/lib/seedance-video";
 import { modelCapabilityConfigFor, normalizeImageValue } from "@/lib/model-capabilities";
 import { resolveCompatibleModel, resolveVideoOperation, type ModelRequirements } from "@/lib/model-selection";
 import { imageMetadata } from "@/lib/canvas/canvas-generation-task-sync";
@@ -316,12 +315,14 @@ export function resolveCanvasGenerationModel(config: AiConfig, model: string | u
     if (!model) return "";
     const normalized = normalizeModelOptionValue(model, config.channels);
     if (!normalized) return "";
-    return modelMatchesCapability(modelOptionName(normalized), mode) ? normalized : "";
+    // 渠道协议和显式能力是生成合同；模型名只在没有元数据时作为最后兜底。
+    // 否则 minimax-h3-r2v 这类不含 video 关键词的合法视频模型会被错误丢弃。
+    return configuredModelMatchesCapability(config, normalized, mode) ? normalized : "";
 }
 
 export function supportsVideoReferenceAudio(config: AiConfig) {
-    const interfaceType = resolveModelRequestConfig(config, config.model).interfaceType;
-    return interfaceType === "newapi-channel-1" || interfaceType === "newapi-channel-2" || isSeedanceVideoConfig(config);
+    const profile = modelCapabilityConfigFor(config, config.model).video;
+    return Boolean(profile && (profile.references.maxVideos > 0 || profile.references.maxAudios > 0));
 }
 
 export function resetInterruptedGeneration(nodes: CanvasNodeData[]) {

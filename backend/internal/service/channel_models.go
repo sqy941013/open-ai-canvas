@@ -52,9 +52,73 @@ func (s *Service) EnsureSystemChannelModels() error {
 			if err := s.syncInitialChannelModels(&channels[index], channelModelNames(channels[index])); err != nil {
 				return err
 			}
+			continue
+		}
+		if err := s.backfillChannelModelCapabilityConfigs(items); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// 升级前创建的图片/视频模型没有能力参数。前端原本已按协议使用同一套默认值，
+// 启动时将其固化到模型记录，避免升级后强校验把仍然启用的既有渠道全部拦截。
+func (s *Service) backfillChannelModelCapabilityConfigs(items []model.ChannelModel) error {
+	for index := range items {
+		item := &items[index]
+		if (item.Capability != "image" && item.Capability != "video") || item.Protocol == "" {
+			continue
+		}
+		profile, changed, err := upgradedChannelModelCapabilityConfig(*item)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			continue
+		}
+		encoded, err := json.Marshal(profile)
+		if err != nil {
+			return err
+		}
+		item.CapabilityConfigJSON = string(encoded)
+		item.CapabilityVersion++
+		if err := s.repo.SaveChannelModel(item); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func upgradedChannelModelCapabilityConfig(item model.ChannelModel) (*ModelCapabilityConfig, bool, error) {
+	raw := strings.TrimSpace(item.CapabilityConfigJSON)
+	if raw == "" {
+		profile, err := NormalizeModelCapabilityConfig(item.Capability, string(item.Protocol), DefaultModelCapabilityConfigForModel(string(item.Protocol), item.ModelKey))
+		return profile, err == nil, err
+	}
+	if item.Capability != "video" || item.Protocol != model.ChannelInterfaceNewAPIVideo || !isMiniMaxH3MultipartVideoModel(item.ModelKey) {
+		return nil, false, nil
+	}
+	profile, err := DecodeModelCapabilityConfig(raw)
+	if err != nil {
+		return nil, false, err
+	}
+	if profile == nil || profile.Video == nil {
+		return profile, false, nil
+	}
+	// 只升级旧默认值，避免覆盖管理员已经为同名模型设置的自定义素材上限。
+	video := profile.Video
+	if video.References.MaxVideos != 0 || video.References.MaxAudios != 0 || video.GenerateAudio.Supported {
+		return profile, false, nil
+	}
+	defaults := DefaultModelCapabilityConfigForModel(string(item.Protocol), item.ModelKey).Video
+	video.References.MaxVideos = defaults.References.MaxVideos
+	video.References.MaxVideoBytes = defaults.References.MaxVideoBytes
+	video.References.MaxVideoDuration = defaults.References.MaxVideoDuration
+	video.References.MaxAudios = defaults.References.MaxAudios
+	video.References.MaxAudioBytes = defaults.References.MaxAudioBytes
+	video.References.MaxAudioDuration = defaults.References.MaxAudioDuration
+	video.GenerateAudio = defaults.GenerateAudio
+	return profile, true, nil
 }
 
 func (s *Service) AdminChannelModels(actor *model.User, channelID string) ([]model.ChannelModel, error) {

@@ -77,10 +77,7 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
     if (isSeedanceVideoConfig(requestConfig)) {
         return createSeedanceTask(requestConfig, selectedModel, prompt, references, videoReferences, audioReferences, options);
     }
-    if (videoReferences.length || audioReferences.length) {
-        throw new Error("当前视频接口不支持参考视频或参考音频，请切换到 Seedance 2.0 / 火山 Agent Plan 模型，或移除参考素材");
-    }
-    return createOpenAIVideoTask(requestConfig, selectedModel, prompt, references, options);
+    return createOpenAIVideoTask(requestConfig, selectedModel, prompt, references, videoReferences, audioReferences, options);
 }
 
 function assertVideoCapability(profile: NonNullable<ReturnType<typeof modelCapabilityConfigFor>["video"]>, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[], seconds: string) {
@@ -328,7 +325,7 @@ export async function storeGeneratedVideo(result: VideoGenerationResult): Promis
     throw new Error("视频接口没有返回可播放的视频");
 }
 
-async function createOpenAIVideoTask(config: ResolvedAiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
+async function createOpenAIVideoTask(config: ResolvedAiConfig, model: string, prompt: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[], options?: RequestOptions): Promise<VideoGenerationTask> {
     const modelName = modelOptionName(model);
     if (config.interfaceType === "xai-video" || modelName.toLowerCase().includes("grok")) {
         const images = await Promise.all(references.slice(0, 7).map((image) => imageToDataUrl(image)));
@@ -358,8 +355,16 @@ async function createOpenAIVideoTask(config: ResolvedAiConfig, model: string, pr
     if (normalizeVideoSize(config.size)) body.append("size", normalizeVideoSize(config.size)!);
     body.append("resolution_name", normalizeVideoResolution(config.vquality));
     body.append("preset", "normal");
-    const files = await Promise.all(references.slice(0, 7).map(async (image) => dataUrlToFile({ ...image, dataUrl: await imageToDataUrl(image) })));
-    files.forEach((file) => body.append("input_reference[]", file));
+    const profile = modelCapabilityConfigFor(config, model).video!;
+    if (profile.generateAudio.supported) body.append("generate_audio", String(boolConfig(config.videoGenerateAudio, profile.generateAudio.default)));
+    const [imageFiles, videoFiles, audioFiles] = await Promise.all([
+        Promise.all(references.map(async (image) => dataUrlToFile({ ...image, dataUrl: await imageToDataUrl(image) }))),
+        Promise.all(videoReferences.map((video) => referenceMediaFile(video, "参考视频"))),
+        Promise.all(audioReferences.map((audio) => referenceMediaFile(audio, "参考音频"))),
+    ]);
+    imageFiles.forEach((file) => body.append("input_reference[]", file));
+    videoFiles.forEach((file) => body.append("input_video[]", file));
+    audioFiles.forEach((file) => body.append("input_audio[]", file));
     try {
         const created = unwrapVideoResponse(await channelPostForm<ApiVideoResponse>(config, aiApiUrl(config, "/videos"), body, options));
         if (!created.id) throw new Error("视频接口没有返回任务 ID");
@@ -367,6 +372,18 @@ async function createOpenAIVideoTask(config: ResolvedAiConfig, model: string, pr
     } catch (error) {
         throw new Error(readAxiosError(error, "视频任务创建失败"));
     }
+}
+
+async function referenceMediaFile(media: ReferenceVideo | ReferenceAudio, label: string) {
+    let blob: Blob | null = null;
+    if (media.storageKey) blob = await getMediaBlob(media.storageKey);
+    if (!blob && media.url) {
+        const response = await fetch(media.url);
+        if (!response.ok) throw new Error(`${label}读取失败（HTTP ${response.status}）`);
+        blob = await response.blob();
+    }
+    if (!blob) throw new Error(`${label}尚未保存，请重新上传`);
+    return new File([blob], media.name || "reference", { type: blob.type || media.type || "application/octet-stream" });
 }
 
 async function pollOpenAIVideoTask(config: ResolvedAiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {

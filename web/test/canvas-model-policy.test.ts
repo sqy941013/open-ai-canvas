@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { canvasConnectionError } from "../src/lib/canvas/canvas-connection-policy";
+import { resolveCanvasGenerationModel, supportsVideoReferenceAudio } from "../src/lib/canvas/canvas-project-generation";
 import { defaultModelCapabilityConfig } from "../src/lib/model-capabilities";
 import { groupModelsByDisplayName, modelCompatibilityError, modelGroupReferenceLimits, resolveCompatibleModel } from "../src/lib/model-selection";
 import { defaultConfig, type AiConfig, type ModelChannel } from "../src/stores/use-config-store";
@@ -52,6 +53,39 @@ function node(id: string, type: CanvasNodeType, generationMode?: "image" | "vide
 }
 
 describe("逻辑模型选择", () => {
+    test("MiniMax H3 newapi 模型开启 multipart 视频和音频能力", () => {
+        const h3 = defaultModelCapabilityConfig("newapi", "minimax-h3-r2v-sage").video!;
+        const generic = defaultModelCapabilityConfig("newapi", "generic-video").video!;
+
+        expect(h3.references.maxVideos).toBe(3);
+        expect(h3.references.maxVideoBytes).toBe(50 * 1024 * 1024);
+        expect(h3.references.maxAudios).toBe(3);
+        expect(h3.generateAudio).toEqual({ supported: true, default: true });
+        expect(generic.references.maxVideos).toBe(0);
+        expect(generic.references.maxAudios).toBe(0);
+        expect(generic.generateAudio.supported).toBe(false);
+    });
+
+    test("按渠道协议识别不含 video 关键词的视频模型", () => {
+        const config = policyConfig();
+        config.channels[0]!.models = ["minimax-h3-r2v"];
+        config.channels[0]!.modelCosts = [
+            {
+                model: "minimax-h3-r2v",
+                capability: "video",
+                protocol: "newapi",
+                billingMode: "fixed_request",
+                unitPriceMicrocredits: 0,
+            },
+        ];
+        config.models = ["relay::minimax-h3-r2v"];
+        config.videoModels = [...config.models];
+        config.model = "relay::minimax-h3-r2v";
+
+        expect(resolveCanvasGenerationModel(config, "relay::minimax-h3-r2v", "video")).toBe("relay::minimax-h3-r2v");
+        expect(supportsVideoReferenceAudio(config)).toBe(true);
+    });
+
     test("同渠道同显示名称合并为一个逻辑模型", () => {
         const config = policyConfig();
         const groups = groupModelsByDisplayName(config, config.videoModels);

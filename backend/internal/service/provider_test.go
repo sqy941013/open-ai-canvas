@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"infinite-canvas/backend/internal/model"
 )
 
 const testReferenceImageDataURL = "data:image/png;base64,aGVsbG8="
@@ -590,6 +592,90 @@ func TestRunVideoTaskUsesNewAPIForAnyVideoModel(t *testing.T) {
 	want := "POST /v1/videos,GET /v1/videos/video-1,GET /v1/videos/video-1/content"
 	if got := strings.Join(paths, ","); got != want {
 		t.Fatalf("paths = %q, want %q", got, want)
+	}
+}
+
+func TestRunVideoTaskUploadsCapabilityEnabledNewAPIMultipartMedia(t *testing.T) {
+	t.Setenv("CANVAS_ALLOW_PRIVATE_UPSTREAMS", "true")
+	paths := make([]string, 0, 3)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		switch r.Method + " " + r.URL.Path {
+		case "POST /v1/videos":
+			if err := r.ParseMultipartForm(2 << 20); err != nil {
+				t.Fatalf("parse create body: %v", err)
+			}
+			if r.FormValue("generate_audio") != "false" {
+				t.Errorf("generate_audio = %q", r.FormValue("generate_audio"))
+			}
+			for field, expected := range map[string]string{
+				"input_reference[]": "hello",
+				"input_video[]":     "video",
+				"input_audio[]":     "audio",
+			} {
+				files := r.MultipartForm.File[field]
+				if len(files) != 1 {
+					t.Errorf("%s files = %#v", field, files)
+					continue
+				}
+				file, err := files[0].Open()
+				if err != nil {
+					t.Errorf("open %s: %v", field, err)
+					continue
+				}
+				data, err := io.ReadAll(file)
+				_ = file.Close()
+				if err != nil || string(data) != expected {
+					t.Errorf("%s data = %q, err = %v", field, data, err)
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"video-media-1","status":"queued"}`))
+		case "GET /v1/videos/video-media-1":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"video-media-1","status":"completed"}`))
+		case "GET /v1/videos/video-media-1/content":
+			w.Header().Set("Content-Type", "video/mp4")
+			_, _ = w.Write([]byte("video"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	capability := DefaultModelCapabilityConfigForModel(string(model.ChannelInterfaceNewAPIVideo), "minimax-h3-r2v").Video
+	result, err := runVideoTask(context.Background(), canvasGenerationInput{
+		Prompt: "make it move",
+		Config: providerConfig{
+			BaseURL: server.URL + "/v1", APIKey: "test-key", Model: "minimax-h3-r2v",
+			InterfaceType: string(model.ChannelInterfaceNewAPIVideo), VideoGenerateAudio: "false",
+		},
+		ReferenceImages: []providerMedia{{ID: "image", DataURL: testReferenceImageDataURL}},
+		ReferenceVideos: []providerMedia{{ID: "video", DataURL: "data:video/mp4;base64,dmlkZW8="}},
+		ReferenceAudios: []providerMedia{{ID: "audio", DataURL: "data:audio/mpeg;base64,YXVkaW8="}},
+		VideoCapability: capability,
+		Metadata:        map[string]interface{}{"videoEditOperation": "image_to_video"},
+	})
+	if err != nil {
+		t.Fatalf("runVideoTask() error = %v", err)
+	}
+	video, ok := result["video"].(map[string]interface{})
+	if !ok || video["dataUrl"] != "data:video/mp4;base64,dmlkZW8=" {
+		t.Fatalf("video = %#v", result["video"])
+	}
+	want := "POST /v1/videos,GET /v1/videos/video-media-1,GET /v1/videos/video-media-1/content"
+	if got := strings.Join(paths, ","); got != want {
+		t.Fatalf("paths = %q, want %q", got, want)
+	}
+}
+
+func TestRunVideoTaskRejectsNewAPIMultipartMediaWithoutCapability(t *testing.T) {
+	_, err := runVideoTask(context.Background(), canvasGenerationInput{
+		Config:          providerConfig{BaseURL: "https://example.com", APIKey: "test-key", Model: "generic-video", InterfaceType: string(model.ChannelInterfaceNewAPIVideo)},
+		ReferenceVideos: []providerMedia{{ID: "video", DataURL: "data:video/mp4;base64,dmlkZW8="}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "未声明参考视频或参考音频能力") {
+		t.Fatalf("runVideoTask() error = %v", err)
 	}
 }
 
