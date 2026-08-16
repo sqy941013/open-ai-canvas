@@ -44,6 +44,7 @@ type providerConfig struct {
 	APIFormat             string                 `json:"apiFormat"`
 	InterfaceType         string                 `json:"interfaceType"`
 	BaseURL               string                 `json:"baseUrl"`
+	AllowLocalChannel     bool                   `json:"allowLocalChannel"`
 	APIKey                string                 `json:"apiKey"`
 	SecretKey             string                 `json:"secretKey"`
 	Headers               []OutboundHeader       `json:"headers"`
@@ -100,12 +101,19 @@ type providerHTTPError struct {
 }
 
 type providerAnalyticsKey struct{}
+type providerOutboundPolicyKey struct{}
+
+type providerOutboundPolicyContext struct {
+	scheme string
+	host   string
+}
 
 type providerAnalyticsContext struct {
 	Service           *Service
 	UserID            string
 	TaskID            string
 	BillingOrderID    string
+	BillingMode       string
 	Capability        string
 	Operation         string
 	ChannelID         string
@@ -118,6 +126,12 @@ type providerAnalyticsContext struct {
 
 func withProviderAnalytics(ctx context.Context, service *Service, task model.Task) context.Context {
 	metadata := providerAnalyticsContext{Service: service, UserID: task.UserID, TaskID: task.ID, BillingOrderID: task.BillingOrderID, Capability: capabilityFromTaskType(task.Type), Operation: task.Operation, Model: task.Model, ProviderRequestID: task.ProviderRequestID}
+	// 账单模式随请求上下文传递，流式协议据此只为 Token 计费开启 usage 终态块。
+	if service != nil && task.BillingOrderID != "" {
+		if order, err := service.repo.BillingOrder(task.BillingOrderID); err == nil {
+			metadata.BillingMode = order.BillingMode
+		}
+	}
 	var input struct {
 		Mode   string         `json:"mode"`
 		Config providerConfig `json:"config"`
@@ -183,6 +197,7 @@ func (s *Service) processCanvasGenerationTask(ctx context.Context, userID string
 		return nil, err
 	}
 	input.Config = config
+	ctx = withProviderOutboundPolicy(ctx, input.Config)
 	if input.Mode == "image" && input.Metadata != nil {
 		if err := s.applyGenerationStyleProfile(userID, taskProjectID, &input); err != nil {
 			return nil, err
@@ -567,9 +582,10 @@ func (s *Service) resolveProviderConfig(config providerConfig) (providerConfig, 
 		channelID = systemChannelIDFromBaseURL(config.BaseURL)
 	}
 	if channelID == "" {
-		if _, err := ValidateOutboundURL(config.BaseURL); err != nil {
+		if _, err := s.validateChannelOutboundURL(config.BaseURL, config.AllowLocalChannel, false); err != nil {
 			return providerConfig{}, err
 		}
+		config.AllowLocalChannel = s.effectiveAllowLocalChannel(config.AllowLocalChannel)
 		return config, nil
 	}
 	channel, err := s.SystemChannel(channelID)
@@ -587,6 +603,9 @@ func (s *Service) resolveProviderConfig(config providerConfig) (providerConfig, 
 	if !stringInSlice(modelName, channelModelNames(*channel)) {
 		return providerConfig{}, errors.New("当前系统渠道未授权该模型")
 	}
+	if _, err := s.validateChannelOutboundURL(channel.BaseURL, channel.AllowLocalChannel, false); err != nil {
+		return providerConfig{}, err
+	}
 	config.ChannelID = channel.ID
 	config.APIFormat = channel.APIFormat
 	channelModel, modelErr := s.repo.ChannelModelByKey(channel.ID, modelName)
@@ -601,6 +620,7 @@ func (s *Service) resolveProviderConfig(config providerConfig) (providerConfig, 
 		config.APIFormat = "openai"
 	}
 	config.BaseURL = channel.BaseURL
+	config.AllowLocalChannel = s.effectiveAllowLocalChannel(channel.AllowLocalChannel)
 	config.APIKey = channel.APIKey
 	config.SecretKey = channel.SecretKey
 	config.Headers, err = ParseOutboundHeadersJSON(channel.HeadersJSON)
@@ -672,7 +692,7 @@ func runImageTask(ctx context.Context, input canvasGenerationInput) (map[string]
 		if imageTransparentBackgroundSupported(input.ImageCapability) && input.Config.TransparentBackground == "true" {
 			writeField(writer, "background", "transparent")
 		}
-		if imageQualitySupported(input.ImageCapability) && input.Config.Quality != "" {
+		if imageQualitySupported(input.ImageCapability) && input.Config.Quality != "" && !strings.EqualFold(strings.TrimSpace(input.Config.Quality), "auto") {
 			writeField(writer, "quality", normalizeImageQuality(input.Config.Quality))
 		}
 		if key, value := imageSizeParameter(input.ImageCapability, input.Config.Size); value != "" {
@@ -709,7 +729,7 @@ func runImageTask(ctx context.Context, input canvasGenerationInput) (map[string]
 		if imageTransparentBackgroundSupported(input.ImageCapability) && input.Config.TransparentBackground == "true" {
 			body["background"] = "transparent"
 		}
-		if imageQualitySupported(input.ImageCapability) && input.Config.Quality != "" {
+		if imageQualitySupported(input.ImageCapability) && input.Config.Quality != "" && !strings.EqualFold(strings.TrimSpace(input.Config.Quality), "auto") {
 			body["quality"] = normalizeImageQuality(input.Config.Quality)
 		}
 		if key, value := imageSizeParameter(input.ImageCapability, input.Config.Size); value != "" {
@@ -1451,6 +1471,16 @@ func runVideoTask(ctx context.Context, input canvasGenerationInput) (map[string]
 		status := strings.ToLower(stringField(state, "status"))
 		if status == "completed" || status == "succeeded" || status == "success" || status == "done" {
 			if videoURL := newAPIVideoResultURL(state); videoURL != "" {
+				if input.Config.InterfaceType == "xai-video" {
+					if _, validationErr := ValidateOutboundURL(videoURL); validationErr != nil {
+						data, mimeType, err := getBinary(ctx, input.Config, "/videos/"+id+"/content")
+						if err != nil {
+							return nil, err
+						}
+						mimeType = normalizedMediaMimeType(mimeType, data)
+						return map[string]interface{}{"mode": "video", "video": map[string]interface{}{"dataUrl": dataURL(mimeType, data), "mimeType": mimeType}}, nil
+					}
+				}
 				data, mimeType, err := getProviderExternalBinary(withProviderRequestKind(ctx, "download"), input.Config, videoURL)
 				if err != nil {
 					return nil, fmt.Errorf("视频结果下载失败（任务 %s）：%w", id, err)
@@ -2015,16 +2045,22 @@ func normalizeNewAPIChannel2Resolution(value string, modelName string) string {
 	if modelName == "grok-video-1.5-1080p" {
 		return "1080p"
 	}
-	switch strings.ToLower(strings.TrimSpace(value)) {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	switch normalized {
 	case "480", "480p", "low":
 		return "480p"
 	case "1080", "1080p":
 		return "1080p"
+	case "1440", "1440p", "2k":
+		return "1440p"
 	case "2160", "2160p", "4k":
 		return "2160p"
-	default:
-		return "720p"
 	}
+	numeric := strings.TrimSuffix(normalized, "p")
+	if resolution, err := strconv.Atoi(numeric); err == nil && resolution > 0 {
+		return strconv.Itoa(resolution) + "p"
+	}
+	return "720p"
 }
 
 func runNewAPIChannel1VideoTask(ctx context.Context, input canvasGenerationInput) (map[string]interface{}, error) {
@@ -2401,6 +2437,12 @@ func runSeedanceAgentPlanVideoTask(ctx context.Context, input canvasGenerationIn
 
 func requestTextProvider(ctx context.Context, config providerConfig, path string, body map[string]interface{}, protocol string, stream bool) (string, error) {
 	if stream {
+		metadata, _ := ctx.Value(providerAnalyticsKey{}).(providerAnalyticsContext)
+		if protocol == "chat-completion" && metadata.BillingMode == "token" {
+			if err := ensureChatCompletionStreamUsage(body); err != nil {
+				return "", err
+			}
+		}
 		return postStreamingText(ctx, config, path, body, protocol)
 	}
 	var payload map[string]interface{}
@@ -2677,6 +2719,28 @@ func doJSON(req *http.Request, target interface{}) error {
 	return nil
 }
 
+func withProviderOutboundPolicy(ctx context.Context, config providerConfig) context.Context {
+	if !config.AllowLocalChannel {
+		return ctx
+	}
+	parsed, err := url.Parse(strings.TrimSpace(config.BaseURL))
+	if err != nil || !isExactDesktopLoopbackHost(parsed.Hostname()) {
+		return ctx
+	}
+	return context.WithValue(ctx, providerOutboundPolicyKey{}, providerOutboundPolicyContext{scheme: strings.ToLower(parsed.Scheme), host: strings.ToLower(parsed.Host)})
+}
+
+func providerLoopbackPolicyForRequest(req *http.Request) (OutboundPolicy, bool) {
+	policyContext, ok := req.Context().Value(providerOutboundPolicyKey{}).(providerOutboundPolicyContext)
+	if !ok || policyContext.scheme == "" || policyContext.host == "" {
+		return OutboundPolicy{}, false
+	}
+	if strings.ToLower(req.URL.Scheme) != policyContext.scheme || strings.ToLower(req.URL.Host) != policyContext.host {
+		return OutboundPolicy{}, false
+	}
+	return desktopLoopbackOutboundPolicy(nil), true
+}
+
 func doBinary(req *http.Request) ([]byte, string, error) {
 	startedAt := time.Now()
 	requestTimeout := providerHTTPTimeout
@@ -2720,12 +2784,21 @@ func doBinary(req *http.Request) ([]byte, string, error) {
 		}
 		defer release()
 	}
-	if _, err := ValidateOutboundURL(req.URL.String()); err != nil {
+	policy, loopback := providerLoopbackPolicyForRequest(req)
+	if loopback {
+		if _, err := validateOutboundURLWithPolicy(req.URL.String(), policy); err != nil {
+			recordProviderRequest(req, startedAt, 0, nil, err)
+			return nil, "", err
+		}
+	} else if _, err := ValidateOutboundURL(req.URL.String()); err != nil {
 		recordProviderRequest(req, startedAt, 0, nil, err)
 		return nil, "", err
 	}
 	ApplyDefaultOutboundHeaders(req)
 	client := OutboundHTTPClient(requestTimeout)
+	if loopback {
+		client = outboundHTTPClientWithPolicy(requestTimeout, policy)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		if runtimeService != nil {

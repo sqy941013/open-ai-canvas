@@ -10,6 +10,7 @@ type OSSFormValues = {
     provider: "aliyun" | "tencent";
     region?: string;
     endpoint?: string;
+    cdnBaseUrl?: string;
     bucket?: string;
     accessKeyId?: string;
     accessKeySecret?: string;
@@ -60,6 +61,7 @@ export function UserOSSSettingsForm() {
                 provider: values.provider || "aliyun",
                 region: values.region?.trim() || "",
                 endpoint: values.endpoint?.trim() || "",
+                cdnBaseUrl: values.cdnBaseUrl?.trim() || "",
                 bucket: values.bucket?.trim() || "",
                 accessKeyId: values.accessKeyId?.trim() || "",
                 accessKeySecret: values.accessKeySecret?.trim() || "",
@@ -83,7 +85,7 @@ export function UserOSSSettingsForm() {
                         <Cloud className="size-4" />
                         我的对象存储
                     </div>
-                    <p className="mt-1 max-w-3xl text-xs leading-5 text-foreground/55">支持阿里云 OSS 与腾讯云 COS。启用后，新上传和新生成的媒体优先写入你的存储桶；停用时回退到平台存储。历史资源固定使用创建时的配置版本。</p>
+                    <p className="mt-1 max-w-3xl text-xs leading-5 text-foreground/55">支持阿里云 OSS 与腾讯云 COS。启用后，新上传和新生成的媒体优先写入你的存储桶；停用时回退到平台存储。历史资源继续使用创建时的存储与密钥配置，同一存储位置的 CDN 域名会跟随当前配置。</p>
                 </div>
                 <div className="flex shrink-0 gap-2">
                     <Tag color={setting?.enabled ? "success" : "default"}>{setting?.enabled ? "已启用" : "未启用"}</Tag>
@@ -101,7 +103,7 @@ export function UserOSSSettingsForm() {
                     <Select
                         options={[{ label: "阿里云 OSS", value: "aliyun" }, { label: "腾讯云 COS", value: "tencent" }]}
                         onChange={(nextProvider: OSSFormValues["provider"]) => {
-                            if (nextProvider !== provider) form.setFieldsValue({ region: "", endpoint: "", bucket: "", accessKeyId: "", accessKeySecret: "" });
+                            if (nextProvider !== provider) form.setFieldsValue({ region: "", endpoint: "", cdnBaseUrl: "", bucket: "", accessKeyId: "", accessKeySecret: "" });
                         }}
                     />
                 </Form.Item>
@@ -110,6 +112,17 @@ export function UserOSSSettingsForm() {
                 </Form.Item>
                 <Form.Item name="endpoint" label="Endpoint" extra={isTencentCOS ? "可留空，系统会根据 Region 生成标准 COS Endpoint。" : undefined} className="mb-3">
                     <Input inputMode="url" spellCheck={false} placeholder={isTencentCOS ? "https://cos.ap-guangzhou.myqcloud.com" : "https://oss-cn-hangzhou.aliyuncs.com"} />
+                </Form.Item>
+                <Form.Item
+                    name="cdnBaseUrl"
+                    label="CDN 加速域名"
+                    extra={isTencentCOS
+                        ? "选填。上传仍走 Endpoint，下载与预览改走 CDN；私有桶需开启 CDN 私有存储桶访问。CDN URL 不附带 COS 签名，未配置 CDN URL 鉴权时链接将长期可访问。"
+                        : "选填。上传仍走 Endpoint，下载与预览改走 CDN；阿里云私有 Bucket 需开启 CDN 私有 Bucket 回源。CDN URL 不附带 OSS 签名，未配置 CDN URL 鉴权时链接将长期可访问。"}
+                    rules={[{ type: "url", message: "请填写完整的 http/https CDN 加速域名" }]}
+                    className="mb-3"
+                >
+                    <Input inputMode="url" spellCheck={false} placeholder="https://media.example.com" />
                 </Form.Item>
                 <Form.Item name="bucket" label="Bucket" className="mb-3">
                     <Input spellCheck={false} placeholder={isTencentCOS ? "my-canvas-assets-1250000000" : "my-canvas-assets"} />
@@ -148,6 +161,7 @@ function toFormValues(setting: UserOSSSetting): OSSFormValues {
         provider: setting.provider || "aliyun",
         region: setting.region,
         endpoint: setting.endpoint,
+        cdnBaseUrl: setting.cdnBaseUrl,
         bucket: setting.bucket,
         accessKeyId: setting.accessKeyId,
         accessKeySecret: "",

@@ -1,15 +1,16 @@
-import { App, Button, Drawer, Form, Input, Modal, Segmented, Select, Switch, Tooltip, Typography } from "antd";
-import { LayoutGrid, List, Plus, RefreshCw, Search } from "lucide-react";
+import { App, Button, Drawer, Form, Input, Modal, Select, Switch, Tooltip, Typography } from "antd";
+import { LayoutGrid, List, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 
 import { ListToolbar, PageHeader, PaginationBar, WorkspacePage } from "@/components/layout/workspace-page";
 import { WorkspaceState } from "@/components/layout/workspace-state";
 import { CONTENT_MODERATION_ERROR_CODE, generationErrorMessage, isContentModerationError } from "@/lib/generation-error";
-import { formatTaskKind, operationOptions, statusLabel } from "@/lib/generation-task-display";
+import { formatTaskKind, isGenerationTaskSubmissionUncertain, operationOptions, statusLabel } from "@/lib/generation-task-display";
 import { modelCapabilityConfigFor } from "@/lib/model-capabilities";
 
-import { cancelGenerationTask, createAgentSession, createGenerationTask, listGenerationTasks, listTaskLogs, queryFailedVideoProviderTask, queryGenerationTask, retryGenerationTask, type CreateTaskInput, type GenerationTask, type TaskLog } from "@/services/api/task-center";
+import { cancelGenerationTask, createAgentSession, createGenerationTask, deleteGenerationTask, formatTaskLog, listGenerationTasks, listTaskLogs, queryFailedVideoProviderTask, queryGenerationTask, refreshGenerationTaskStatus, retryGenerationTask, type CreateTaskInput, type GenerationTask, type TaskLog } from "@/services/api/task-center";
+import { localDreaminaCancellationCopy, localDreaminaDetachOutcome } from "@/services/local-dreamina-task-projection";
 import { syncGenerationTaskToCanvasStore } from "@/lib/canvas/canvas-generation-task-sync";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { resolveModelRequestConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
@@ -19,7 +20,7 @@ import { TaskGridCard } from "./task-grid-card";
 import { TaskGroupHeader, type TaskGroup } from "./task-group-header";
 import { TaskListRow } from "./task-list-row";
 import { formatModelName, getTaskCanvasContext, isTaskFailed, providerCancelStatusLabel, taskMediaKind } from "./task-shared";
-import { TaskStatPills, type TaskStatusFilter } from "./task-stat-pills";
+import { TaskStatusFilterBar, type TaskStatusFilter } from "./task-status-filter";
 
 type TaskKindFilter = "all" | "text" | "image" | "video";
 type TaskViewMode = "list" | "grid";
@@ -125,7 +126,7 @@ export default function TasksPage() {
             else if (task.status === "succeeded") succeeded += 1;
             else if (task.status === "failed" || task.status === "cancelled") failed += 1;
         }
-        return { today, active, succeeded, failed };
+        return { total: tasks.length, today, active, succeeded, failed };
     }, [tasks]);
     const groupingActive = viewMode === "list" && groupEnabled;
     const visibleTaskGroups = useMemo(
@@ -289,21 +290,71 @@ export default function TasksPage() {
     }, [loadTasks]);
 
     const runAction = async (id: string, action: "retry" | "cancel") => {
+        const currentTask = tasksRef.current.find((task) => task.id === id);
+        if (action === "retry" && currentTask && isGenerationTaskSubmissionUncertain(currentTask)) {
+            message.warning("提交结果尚未确认，不能自动重试；请先核对官方状态，避免重复生成。");
+            return;
+        }
         setActingId(id);
         try {
             const next = action === "retry" ? await retryGenerationTask(id) : await cancelGenerationTask(id);
             setTasks((items) => items.map((item) => (item.id === id ? next : item)));
+            setDetailTask((current) => (current?.id === id ? { ...current, ...next } : current));
             if (action === "retry") {
                 setStatusFilter("active");
                 setPage(1);
             }
+            const localOutcome = localDreaminaDetachOutcome(next);
             if (action === "retry") message.success("任务已重新入队");
+            else if (localOutcome?.kind === "background") message.info(localOutcome.message);
             else if (next.providerCancelStatus === "requested") message.info("已请求上游取消，正在确认费用状态");
             else if (next.providerCancelStatus === "confirmed") message.success("上游已确认取消，积分已退回");
             else if (next.providerCancelStatus === "uncertain") message.warning("任务已取消，上游费用待核对");
             else message.success("任务已取消，积分已退回");
         } catch (error) {
             message.error(error instanceof Error ? error.message : "操作失败");
+        } finally {
+            setActingId("");
+        }
+    };
+
+    const deleteLocalTask = (task: GenerationTask) => {
+        Modal.confirm({
+            title: "删除本机任务记录？",
+            content:
+                localDreaminaCancellationCopy(task)?.kind === "background"
+                    ? "任务已由官方接受；删除后仍会在后台同步官方状态。"
+                    : task.status === "queued"
+                      ? "任务尚未提交官方；删除会取消本机排队且不会触发官方请求。"
+                      : "这只会删除本机任务记录，不会删除已生成的素材。",
+            okText: "删除本机记录",
+            okButtonProps: { danger: true },
+            cancelText: "保留",
+            onOk: async () => {
+                setActingId(task.id);
+                try {
+                    await deleteGenerationTask(task.id);
+                    setTasks((items) => items.filter((item) => item.id !== task.id));
+                    if (detailTask?.id === task.id) setDetailTask(null);
+                    message.success("本机任务记录已删除");
+                } catch (error) {
+                    message.error(error instanceof Error ? error.message : "删除失败");
+                } finally {
+                    setActingId("");
+                }
+            },
+        });
+    };
+
+    const refreshLocalTaskStatus = async (task: GenerationTask) => {
+        setActingId(task.id);
+        try {
+            const next = await refreshGenerationTaskStatus(task.id);
+            setTasks((items) => items.map((item) => (item.id === task.id ? { ...item, ...next } : item)));
+            setDetailTask((current) => (current?.id === task.id ? { ...current, ...next } : current));
+            message.success(next.officialStatus ? `官方返回状态：${next.officialStatus}` : "状态已更新");
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "更新状态失败");
         } finally {
             setActingId("");
         }
@@ -397,7 +448,6 @@ export default function TasksPage() {
                                 </>
                             )}
                     />
-                    <TaskStatPills stats={taskStats} statusFilter={statusFilter} onFilterChange={setStatusFilter} />
                     <ListToolbar
                         className="library-toolbar task-library-toolbar"
                         active={Boolean(keyword || projectFilter !== "all" || kindFilter !== "all" || modelFilter !== "all" || statusFilter !== "all")}
@@ -421,21 +471,11 @@ export default function TasksPage() {
                             </div>
                         )}
                     >
+                        <TaskStatusFilterBar stats={taskStats} value={statusFilter} onChange={(value) => { setStatusFilter(value); setPage(1); }} />
                         <Input id="task-search" name="taskSearch" allowClear className="app-list-search" prefix={<Search className="size-4 text-foreground/40" />} value={keyword} placeholder="搜索任务、模型或画布" onChange={(event) => { setKeyword(event.target.value); setPage(1); }} />
                         <Select className="w-full sm:w-48" value={projectFilter} onChange={(value) => { setProjectFilter(value); setPage(1); }} options={[{ label: "全部画布", value: "all" }, ...projectOptions]} />
                         <Select className="w-full sm:w-32" value={kindFilter} onChange={(value) => { setKindFilter(value as TaskKindFilter); setPage(1); }} options={[{ label: "全部类型", value: "all" }, { label: "文本", value: "text" }, { label: "图片", value: "image" }, { label: "视频", value: "video" }]} />
                         <Select className="w-full sm:w-44" value={modelFilter} onChange={(value) => { setModelFilter(value); setPage(1); }} options={[{ label: "全部模型", value: "all" }, ...modelOptions.map((model) => ({ label: model, value: model }))]} />
-                        <Segmented
-                            size="small"
-                            value={statusFilter}
-                            onChange={(value) => { setStatusFilter(value as typeof statusFilter); setPage(1); }}
-                            options={[
-                                { label: "全部", value: "all" },
-                                { label: "失败/取消", value: "failed" },
-                                { label: "运行中", value: "active" },
-                                { label: "已完成", value: "succeeded" },
-                            ]}
-                        />
                     </ListToolbar>
                 </div>
 
@@ -492,7 +532,7 @@ export default function TasksPage() {
             <Drawer className="library-drawer" title="任务详情" open={Boolean(detailTask)} onClose={() => setDetailTask(null)} size="large" destroyOnHidden>
                 {detailTask ? (
                     <div className="space-y-5">
-                        <div className="grid border-y border-border text-sm sm:grid-cols-2">
+                        <div className="task-detail-facts grid text-sm sm:grid-cols-2">
                             <InfoItem label="状态" value={statusLabel[detailTask.status]} />
                             <InfoItem label="画布名称" value={getTaskCanvasContext(detailTask, canvasById, domainProjectNameById).canvasName} />
                             <InfoItem label="任务类型" value={formatTaskKind(detailTask)} />
@@ -502,15 +542,33 @@ export default function TasksPage() {
                             {detailTask.providerCancelStatus ? <InfoItem label="上游取消" value={providerCancelStatusLabel(detailTask)} /> : null}
                             {detailTask.providerCancelRequestedAt ? <InfoItem label="请求取消时间" value={formatDate(detailTask.providerCancelRequestedAt)} /> : null}
                         </div>
-                        {canQueryProviderTask(detailTask) ? <div className="flex justify-end"><Button icon={<RefreshCw className="size-4" />} loading={actingId === detailTask.id} onClick={() => void queryProviderTask(detailTask)}>手动查询任务</Button></div> : null}
-                        {detailTask.error ? <pre className="max-h-28 overflow-auto whitespace-pre-wrap border-l-2 border-red-500 bg-red-50 px-3 py-2 text-xs text-red-700 dark:bg-red-950/30 dark:text-red-300">{generationErrorMessage(detailTask.error)}</pre> : null}
+                        {detailTask.provider === "dreamina-cli" ? <p className="text-xs leading-5 text-foreground/60">官方状态采用最终一致轮询；转入后台后仍会继续等待并同步官方状态。官方即梦 CLI 当前不支持可靠的官方取消。</p> : null}
+                        <div className="flex flex-wrap justify-end gap-2">
+                            {detailTask.provider === "dreamina-cli" && detailTask.receiptRecorded && detailTask.status === "running" ? (
+                                <Button aria-label="更新官方状态" icon={<RefreshCw className="size-4" />} loading={actingId === detailTask.id} onClick={() => void refreshLocalTaskStatus(detailTask)}>
+                                    更新官方状态
+                                </Button>
+                            ) : null}
+                            {detailTask.provider === "dreamina-cli" && (detailTask.status === "queued" || detailTask.status === "running") ? (
+                                <Button danger loading={actingId === detailTask.id} onClick={() => void runAction(detailTask.id, "cancel")}>
+                                    {localDreaminaCancellationCopy(detailTask)?.action || "取消任务"}
+                                </Button>
+                            ) : null}
+                            {detailTask.provider === "dreamina-cli" ? (
+                                <Button danger aria-label="删除本机记录" icon={<Trash2 className="size-4" />} loading={actingId === detailTask.id} onClick={() => deleteLocalTask(detailTask)}>
+                                    删除本机记录
+                                </Button>
+                            ) : null}
+                            {canQueryProviderTask(detailTask) ? <Button icon={<RefreshCw className="size-4" />} loading={actingId === detailTask.id} onClick={() => void queryProviderTask(detailTask)}>手动查询任务</Button> : null}
+                        </div>
+                        {detailTask.error ? <pre className="task-detail-error max-h-28 overflow-auto whitespace-pre-wrap px-3 py-2 text-xs">{generationErrorMessage(detailTask.error)}</pre> : null}
                         <TaskResultMedia value={detailTask.resultJson} taskType={detailTask.type} />
                         <DetailBlock title="输入" value={detailLoading ? "详情加载中..." : formatTaskJson(detailTask.inputJson)} />
                         <DetailBlock title="结果" value={detailLoading ? "详情加载中..." : formatTaskJson(detailTask.resultJson)} />
                         <div>
                             <Typography.Text strong>日志</Typography.Text>
                             <div className="mt-2 max-h-60 overflow-auto rounded-lg bg-slate-950 p-3 text-xs text-slate-100">
-                                {logsLoading ? "日志加载中..." : taskLogs.length ? taskLogs.map((log) => `[${new Date(log.createdAt).toLocaleString()}] ${log.level.toUpperCase()} ${log.message}${log.payload ? `\n${generationErrorMessage(log.payload)}` : ""}`).join("\n\n") : "暂无日志"}
+                                {logsLoading ? "日志加载中..." : taskLogs.length ? taskLogs.map((log) => `[${new Date(log.createdAt).toLocaleString()}] ${log.level.toUpperCase()} ${formatTaskLog(log)}`).join("\n\n") : "暂无日志"}
                             </div>
                         </div>
                     </div>
@@ -626,7 +684,7 @@ function formatDate(value?: string) {
 
 function InfoItem({ label, value }: { label: string; value: string }) {
     return (
-        <div className="min-w-0 border-b border-border px-0 py-2.5">
+        <div className="task-detail-fact min-w-0 px-3 py-2.5">
             <Typography.Text type="secondary" className="block text-xs">
                 {label}
             </Typography.Text>

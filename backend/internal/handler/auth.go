@@ -590,11 +590,19 @@ func RegisterAdminRoutes(r *gin.RouterGroup, svc *service.Service) {
 			failService(c, err)
 			return
 		}
-		stream, err := svc.OpenAdminAPICallLogMediaRange(user, c.Param("id"), c.GetHeader("Range"))
+		delivery, err := svc.PrepareAdminAPICallLogMediaDelivery(user, c.Param("id"), c.GetHeader("Range"))
 		if err != nil {
 			failService(c, err)
 			return
 		}
+		if delivery.RedirectURL != "" {
+			c.Header("Cache-Control", "private, no-store")
+			c.Header("Referrer-Policy", "no-referrer")
+			c.Header("X-Content-Type-Options", "nosniff")
+			c.Redirect(http.StatusTemporaryRedirect, delivery.RedirectURL)
+			return
+		}
+		stream := delivery.Stream
 		defer stream.Body.Close()
 		resource := stream.Resource
 		mimeType := resource.MimeType
@@ -707,8 +715,10 @@ func proxySystemRequest(c *gin.Context, svc *service.Service, user *model.User, 
 	modelName := proxyRequestModelForPath(path, c.GetHeader("Content-Type"), body)
 	protocol := model.ChannelInterfaceType("")
 	capability := "text"
+	var channelModel *model.ChannelModel
 	if !(c.Request.Method == http.MethodGet && path == "/models") {
-		channelModel, modelErr := svc.SystemChannelModel(channel.ID, modelName)
+		var modelErr error
+		channelModel, modelErr = svc.SystemChannelModel(channel.ID, modelName)
 		if modelErr != nil || channelModel.Protocol == "" {
 			fail(c, http.StatusForbidden, errors.New("当前系统渠道未授权该模型或模型协议尚未配置"))
 			return
@@ -720,6 +730,13 @@ func proxySystemRequest(c *gin.Context, svc *service.Service, user *model.User, 
 		fail(c, http.StatusForbidden, err)
 		return
 	}
+	if channelModel != nil && channelModel.BillingMode == "token" && protocol == model.ChannelInterfaceChatCompletion {
+		body, err = service.EnsureChatCompletionStreamUsageRequest(body)
+		if err != nil {
+			fail(c, http.StatusBadRequest, err)
+			return
+		}
+	}
 	billingOrderID := ""
 	query := c.Request.URL.Query()
 	for _, key := range []string{"key", "api_key", "access_token", "token"} {
@@ -729,7 +746,8 @@ func proxySystemRequest(c *gin.Context, svc *service.Service, user *model.User, 
 	if encodedQuery := query.Encode(); encodedQuery != "" {
 		target += "?" + encodedQuery
 	}
-	if _, err := service.ValidateOutboundURL(target); err != nil {
+	validatedTarget, err := svc.ValidateChannelOutboundURL(target, channel.AllowLocalChannel, false)
+	if err != nil {
 		_ = svc.RefundBilling(billingOrderID, "系统渠道地址校验失败")
 		failService(c, err)
 		return
@@ -764,7 +782,7 @@ func proxySystemRequest(c *gin.Context, svc *service.Service, user *model.User, 
 			}
 		}
 	}
-	upstreamReq, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, target, bytes.NewReader(body))
+	upstreamReq, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, validatedTarget.String(), bytes.NewReader(body))
 	if err != nil {
 		_ = svc.RefundBilling(billingOrderID, "系统渠道请求构造失败")
 		fail(c, http.StatusBadRequest, err)
@@ -787,7 +805,7 @@ func proxySystemRequest(c *gin.Context, svc *service.Service, user *model.User, 
 	status := model.ApiCallStatusSucceeded
 	statusCode := 0
 	errorText := ""
-	resp, err := service.OutboundHTTPClient(35 * time.Minute).Do(upstreamReq)
+	resp, err := svc.OutboundHTTPClientForChannel(35*time.Minute, validatedTarget, channel.AllowLocalChannel).Do(upstreamReq)
 	if err != nil {
 		status = model.ApiCallStatusFailed
 		errorText = err.Error()
