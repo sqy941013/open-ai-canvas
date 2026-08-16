@@ -1368,8 +1368,8 @@ func runVideoTask(ctx context.Context, input canvasGenerationInput) (map[string]
 	if isSeedanceVideoConfig(input.Config) {
 		return runSeedanceVideosTask(ctx, input)
 	}
-	if len(input.ReferenceVideos) > 0 || len(input.ReferenceAudios) > 0 {
-		return nil, errors.New("OpenAI 风格视频接口不支持参考视频或参考音频，请切换到 Seedance / Agent Plan 渠道")
+	if err := validateNewAPIMultipartMediaCapability(input); err != nil {
+		return nil, err
 	}
 	id := resumedProviderRequestID(ctx)
 	var created map[string]interface{}
@@ -1402,11 +1402,24 @@ func runVideoTask(ctx context.Context, input canvasGenerationInput) (map[string]
 		}
 		writeField(writer, "resolution_name", normalizeVideoResolution(input.Config.VQuality))
 		writeField(writer, "preset", "normal")
+		if videoCapabilitySupportsAudio(input) {
+			writeField(writer, "generate_audio", strconv.FormatBool(parseBool(input.Config.VideoGenerateAudio, true)))
+		}
 		if shouldSendNewAPIVideoImages(input) {
 			for _, image := range input.ReferenceImages {
 				if err := writeMediaPart(writer, "input_reference[]", image); err != nil {
 					return nil, err
 				}
+			}
+		}
+		for _, video := range input.ReferenceVideos {
+			if err := writeMediaPart(writer, "input_video[]", video); err != nil {
+				return nil, err
+			}
+		}
+		for _, audio := range input.ReferenceAudios {
+			if err := writeMediaPart(writer, "input_audio[]", audio); err != nil {
+				return nil, err
 			}
 		}
 		if err := writer.Close(); err != nil {
@@ -3042,6 +3055,22 @@ func shouldSendNewAPIVideoImages(input canvasGenerationInput) bool {
 // 本地测试 helper 没有能力配置时保留历史协议字段；真实系统任务会携带已解析的模型能力。
 func videoCapabilitySupportsAudio(input canvasGenerationInput) bool {
 	return input.VideoCapability == nil || input.VideoCapability.GenerateAudio.Supported
+}
+
+func validateNewAPIMultipartMediaCapability(input canvasGenerationInput) error {
+	if len(input.ReferenceVideos) == 0 && len(input.ReferenceAudios) == 0 {
+		return nil
+	}
+	if input.VideoCapability == nil {
+		return errors.New("当前 OpenAI 视频模型未声明参考视频或参考音频能力")
+	}
+	if len(input.ReferenceVideos) > 0 && input.VideoCapability.References.MaxVideos == 0 {
+		return errors.New("当前 OpenAI 视频模型不支持参考视频")
+	}
+	if len(input.ReferenceAudios) > 0 && input.VideoCapability.References.MaxAudios == 0 {
+		return errors.New("当前 OpenAI 视频模型不支持参考音频")
+	}
+	return nil
 }
 
 func videoCapabilitySupportsWatermark(input canvasGenerationInput) bool {
