@@ -2,10 +2,12 @@ import { create } from "zustand";
 import { persist, type PersistStorage, type StorageValue } from "zustand/middleware";
 
 import { nanoid } from "nanoid";
+import { normalizeCanvasAppearance, readCanvasAppearanceDefault, type CanvasAppearance } from "@/lib/canvas/canvas-appearance";
 import { parseCanvasStorageDocument, rebaseCanvasProjects, serializeCanvasStorageDocument, type CanvasStorageDocument } from "@/lib/canvas/canvas-storage-revision";
 import { localForageStorageForScope } from "@/lib/localforage-storage";
 import { getActiveUserScope } from "@/lib/user-scope";
 import type { CanvasBackgroundMode } from "@/lib/canvas-theme";
+import type { CanvasStarterMode } from "@/lib/canvas/canvas-starter";
 import type { CanvasAssistantSession, CanvasConnection, CanvasNodeData, ViewportTransform } from "@/types/canvas";
 import type { DirectorScene } from "@/types/director";
 import type { TimelineProject } from "@/types/timeline";
@@ -20,6 +22,8 @@ export type CanvasProject = {
     connections: CanvasConnection[];
     chatSessions: CanvasAssistantSession[];
     activeChatId: string | null;
+    starterMode?: CanvasStarterMode;
+    appearance?: CanvasAppearance;
     backgroundMode: CanvasBackgroundMode;
     showImageInfo: boolean;
     viewport: ViewportTransform;
@@ -36,7 +40,7 @@ type CanvasStore = {
     renameProject: (id: string, title: string) => void;
     deleteProjects: (ids: string[]) => void;
     replaceProjects: (projects: CanvasProject[]) => void;
-    updateProject: (id: string, patch: Partial<Pick<CanvasProject, "projectId" | "nodes" | "connections" | "chatSessions" | "activeChatId" | "backgroundMode" | "showImageInfo" | "viewport" | "directorScenes" | "timeline">>) => void;
+    updateProject: (id: string, patch: Partial<Pick<CanvasProject, "projectId" | "nodes" | "connections" | "chatSessions" | "activeChatId" | "starterMode" | "appearance" | "backgroundMode" | "showImageInfo" | "viewport" | "directorScenes" | "timeline">>) => void;
 };
 
 const initialViewport: ViewportTransform = { x: 0, y: 0, k: 1 };
@@ -62,6 +66,13 @@ const observedCanvasPersists = new Map<string, ObservedCanvasPersist>();
 const queuedCanvasPersists = new Map<string, QueuedCanvasPersist>();
 const canvasSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const canvasPersistTokens = new Map<string, number>();
+type CanvasGenerationPersistenceAttempt = {
+    previousNodes?: CanvasNodeData[];
+    nodes?: CanvasNodeData[];
+    previousChatSessions?: CanvasAssistantSession[];
+    chatSessions?: CanvasAssistantSession[];
+};
+const pendingCanvasGenerationAttempts = new Map<string, Map<string, CanvasGenerationPersistenceAttempt>>();
 
 type AsyncCanvasStorageLock = {
     request<T>(name: string, callback: () => Promise<T>): Promise<T>;
@@ -162,7 +173,7 @@ export function rebasePendingCanvasStorePersistenceAfterGenerationCommitLocked(s
     // Dedicated commit 已确认 generation stamp；用同 scope 最新内存重新投影队列，避免同节点普通编辑被旧 durable 快照替换。
     queued.baseProjects = committed.state.projects;
     queued.baseRevision = committed.storageRevision;
-    queued.state = ordinaryCanvasPersistenceState({ projects: latestMemory }, committed.state.projects);
+    queued.state = ordinaryCanvasPersistenceState(scope, { projects: latestMemory }, committed.state.projects);
 }
 
 export function withCanvasStorePersistenceSuppressed<T>(operation: () => T) {
@@ -174,11 +185,82 @@ export function withCanvasStorePersistenceSuppressed<T>(operation: () => T) {
     }
 }
 
+export function registerCanvasGenerationPersistenceAttempt(scope: string, projectId: string, effectKey: string, attempt: CanvasGenerationPersistenceAttempt) {
+    const projectKey = `${scope}\0${projectId}`;
+    const attempts = pendingCanvasGenerationAttempts.get(projectKey) ?? new Map<string, CanvasGenerationPersistenceAttempt>();
+    attempts.set(effectKey, attempt);
+    pendingCanvasGenerationAttempts.set(projectKey, attempts);
+    const queued = queuedCanvasPersists.get(scope);
+    if (queued) {
+        const latestMemory = canvasMemoryStates.get(scope)?.projects ?? queued.state.projects;
+        const durableProjects = observedCanvasPersists.get(scope)?.projects ?? queued.baseProjects;
+        queued.state = ordinaryCanvasPersistenceState(scope, { projects: latestMemory }, durableProjects);
+    }
+    return () => {
+        if (attempts.get(effectKey) !== attempt) return;
+        attempts.delete(effectKey);
+        if (!attempts.size) pendingCanvasGenerationAttempts.delete(projectKey);
+    };
+}
+
 function hasUnconfirmedGenerationKey(localKeys?: string[], durableKeys?: string[]) {
     return Boolean(localKeys?.some((key) => !durableKeys?.includes(key)));
 }
 
-function ordinaryCanvasProjectSnapshot(project: CanvasProject, durableProject: CanvasProject | undefined) {
+function samePersistenceValue(left: unknown, right: unknown) {
+    return left === right || JSON.stringify(left) === JSON.stringify(right);
+}
+
+function rollbackGenerationValue(previous: unknown, attempted: unknown, live: unknown, durable: unknown): unknown {
+    if (samePersistenceValue(previous, attempted)) return live;
+    if (samePersistenceValue(live, attempted)) return durable;
+    if (!previous || !attempted || !live || !durable || Array.isArray(previous) || Array.isArray(attempted) || Array.isArray(live) || Array.isArray(durable) || typeof previous !== "object" || typeof attempted !== "object" || typeof live !== "object" || typeof durable !== "object") return live;
+
+    const previousRecord = previous as Record<string, unknown>;
+    const attemptedRecord = attempted as Record<string, unknown>;
+    const liveRecord = live as Record<string, unknown>;
+    const durableRecord = durable as Record<string, unknown>;
+    const result: Record<string, unknown> = { ...durableRecord };
+    for (const key of new Set([...Object.keys(previousRecord), ...Object.keys(attemptedRecord), ...Object.keys(liveRecord)])) {
+        const previousHasKey = Object.hasOwn(previousRecord, key);
+        const attemptedHasKey = Object.hasOwn(attemptedRecord, key);
+        const liveHasKey = Object.hasOwn(liveRecord, key);
+        if (!previousHasKey && !attemptedHasKey) {
+            if (liveHasKey) result[key] = liveRecord[key];
+            continue;
+        }
+        if (!previousHasKey && attemptedHasKey) {
+            if (!liveHasKey || samePersistenceValue(liveRecord[key], attemptedRecord[key])) delete result[key];
+            else result[key] = liveRecord[key];
+            continue;
+        }
+        if (previousHasKey && !attemptedHasKey) {
+            if (liveHasKey) result[key] = liveRecord[key];
+            continue;
+        }
+        if (!liveHasKey) {
+            delete result[key];
+            continue;
+        }
+        const value = rollbackGenerationValue(previousRecord[key], attemptedRecord[key], liveRecord[key], durableRecord[key]);
+        if (value === undefined) delete result[key];
+        else result[key] = value;
+    }
+    return result;
+}
+
+function pendingGenerationAttempt(scope: string, projectId: string, effectKeys?: string[]) {
+    const attempts = pendingCanvasGenerationAttempts.get(`${scope}\0${projectId}`);
+    if (!attempts) return undefined;
+    for (const effectKey of effectKeys || []) {
+        const attempt = attempts.get(effectKey);
+        if (attempt) return attempt;
+    }
+    return undefined;
+}
+
+function ordinaryCanvasProjectSnapshot(scope: string, project: CanvasProject, durableProject: CanvasProject | undefined) {
+    if (!hasGenerationEffectKeys(project) && !hasGenerationEffectKeys(durableProject)) return project;
     const durableNodes = new Map((durableProject?.nodes || []).map((node) => [node.id, node]));
     const durableSessions = new Map((durableProject?.chatSessions || []).map((session) => [session.id, session]));
     let changed = false;
@@ -191,10 +273,23 @@ function ordinaryCanvasProjectSnapshot(project: CanvasProject, durableProject: C
         if (durableProject && hasUnconfirmedGenerationKey(localKeys, durableKeys)) {
             hasUnconfirmedGeneration = true;
             changed = true;
-            if (durableNode) nodes.push(durableNode);
+            if (durableNode) {
+                const attempt = pendingGenerationAttempt(scope, project.id, localKeys);
+                const previousNode = attempt?.previousNodes?.find((candidate) => candidate.id === node.id);
+                const attemptedNode = attempt?.nodes?.find((candidate) => candidate.id === node.id);
+                // durableNode comes from the observed storage snapshot. Never mutate that snapshot while
+                // rebuilding a failed generation, otherwise a later retry observes a partially rolled-back base.
+                const rolledBack = previousNode && attemptedNode
+                    ? (rollbackGenerationValue(previousNode, attemptedNode, node, durableNode) as CanvasNodeData)
+                    : { ...durableNode, metadata: durableNode.metadata ? { ...durableNode.metadata } : undefined };
+                const metadata = { ...(rolledBack.metadata || {}) };
+                if (durableKeys?.length) metadata.generationEffectKeys = [...durableKeys];
+                else delete metadata.generationEffectKeys;
+                nodes.push({ ...rolledBack, metadata });
+            }
             continue;
         }
-        if (JSON.stringify(localKeys) === JSON.stringify(durableKeys)) {
+        if (sameGenerationEffectKeys(localKeys, durableKeys)) {
             nodes.push(node);
             continue;
         }
@@ -211,10 +306,20 @@ function ordinaryCanvasProjectSnapshot(project: CanvasProject, durableProject: C
         if (durableProject && hasUnconfirmedGenerationKey(session.generationEffectKeys, durableKeys)) {
             hasUnconfirmedGeneration = true;
             changed = true;
-            if (durableSession) chatSessions.push(durableSession);
+            if (durableSession) {
+                const attempt = pendingGenerationAttempt(scope, project.id, session.generationEffectKeys);
+                const previousSession = attempt?.previousChatSessions?.find((candidate) => candidate.id === session.id);
+                const attemptedSession = attempt?.chatSessions?.find((candidate) => candidate.id === session.id);
+                const rolledBack = previousSession && attemptedSession
+                    ? (rollbackGenerationValue(previousSession, attemptedSession, session, durableSession) as CanvasAssistantSession)
+                    : { ...durableSession, generationEffectKeys: durableSession.generationEffectKeys ? [...durableSession.generationEffectKeys] : undefined };
+                if (durableKeys?.length) rolledBack.generationEffectKeys = [...durableKeys];
+                else delete rolledBack.generationEffectKeys;
+                chatSessions.push(rolledBack);
+            }
             continue;
         }
-        if (JSON.stringify(session.generationEffectKeys) === JSON.stringify(durableKeys)) {
+        if (sameGenerationEffectKeys(session.generationEffectKeys, durableKeys)) {
             chatSessions.push(session);
             continue;
         }
@@ -237,16 +342,29 @@ function ordinaryCanvasProjectSnapshot(project: CanvasProject, durableProject: C
     return changed ? { ...project, nodes, chatSessions } : project;
 }
 
-function ordinaryCanvasPersistenceState(state: PersistedCanvasState, durableProjects: CanvasProject[]) {
+function hasGenerationEffectKeys(value: CanvasProject | undefined) {
+    if (!value) return false;
+    return value.nodes.some((node) => Boolean(node.metadata?.generationEffectKeys?.length))
+        || value.chatSessions.some((session) => Boolean(session.generationEffectKeys?.length));
+}
+
+function sameGenerationEffectKeys(left?: readonly string[], right?: readonly string[]) {
+    if (left === right) return true;
+    if (!left?.length && !right?.length) return true;
+    if (!left || !right || left.length !== right.length) return false;
+    return left.every((value, index) => value === right[index]);
+}
+
+function ordinaryCanvasPersistenceState(scope: string, state: PersistedCanvasState, durableProjects: CanvasProject[]) {
     const durableById = new Map(durableProjects.map((project) => [project.id, project]));
     return {
-        projects: state.projects.map((project) => ordinaryCanvasProjectSnapshot(project, durableById.get(project.id))),
+        projects: state.projects.map((project) => ordinaryCanvasProjectSnapshot(scope, project, durableById.get(project.id))),
     };
 }
 
 export function reconcileCanvasGenerationFailure(scope: string, durableProjects: CanvasProject[]) {
     if (getActiveUserScope() !== scope) return;
-    const projects = ordinaryCanvasPersistenceState({ projects: useCanvasStore.getState().projects }, durableProjects).projects;
+    const projects = ordinaryCanvasPersistenceState(scope, { projects: useCanvasStore.getState().projects }, durableProjects).projects;
     withCanvasStorePersistenceSuppressed(() => {
         useCanvasStore.setState({ projects });
     });
@@ -285,7 +403,7 @@ const canvasStorage: PersistStorage<CanvasStore> = {
             baseProjects,
             baseRevision: queued?.baseRevision ?? observed?.revision ?? 0,
             // generationEffectKeys 由专用 generation durable commit 管理；普通队列只能携带已确认 stamp。
-            state: ordinaryCanvasPersistenceState(nextState, observed?.projects ?? baseProjects),
+            state: ordinaryCanvasPersistenceState(scope, nextState, observed?.projects ?? baseProjects),
             token,
         });
         clearCanvasSaveTimer(scope);
@@ -318,6 +436,7 @@ export const useCanvasStore = create<CanvasStore>()(
             createProject: (title = "未命名画布", projectId) => {
                 const now = new Date().toISOString();
                 const id = nanoid();
+                const appearanceDefault = readCanvasAppearanceDefault();
                 const project: CanvasProject = {
                     id,
                     projectId,
@@ -328,7 +447,8 @@ export const useCanvasStore = create<CanvasStore>()(
                     connections: [],
                     chatSessions: [],
                     activeChatId: null,
-                    backgroundMode: "dots",
+                    appearance: appearanceDefault?.appearance,
+                    backgroundMode: appearanceDefault?.backgroundMode || "lines",
                     showImageInfo: false,
                     viewport: initialViewport,
                     directorScenes: [],
@@ -348,7 +468,9 @@ export const useCanvasStore = create<CanvasStore>()(
                     connections: source.connections || [],
                     chatSessions: source.chatSessions || [],
                     activeChatId: source.activeChatId || null,
-                    backgroundMode: source.backgroundMode || "dots",
+                    starterMode: source.starterMode,
+                    appearance: source.appearance ? normalizeCanvasAppearance(source.appearance, "dark") : undefined,
+                    backgroundMode: source.backgroundMode || "lines",
                     showImageInfo: source.showImageInfo || false,
                     viewport: source.viewport || initialViewport,
                     directorScenes: source.directorScenes || [],

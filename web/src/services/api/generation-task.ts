@@ -6,9 +6,15 @@ import { LOCAL_DREAMINA_WAIT_STOPPED_CODE, LocalDreaminaGenerationClientError, r
 import { isLocalDreaminaBackgroundTask, localDreaminaTaskId, projectLocalDreaminaTask, stripLocalDreaminaTaskPrefix } from "@/services/local-dreamina-task-projection";
 import { modelCapabilityConfigFor } from "@/lib/model-capabilities";
 import { grokImagePromptLimitError } from "@/lib/grok-image-prompt-limit";
-import { resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
+import { resolveGenerationWorkflowExecution, type GenerationWorkflowExecution } from "@/lib/generation-workflow-execution";
+import { resolveVideoOperation } from "@/lib/model-selection";
+import { logicalModelIDForConfig, modelOptionName, resolveModelChannel, resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
+import { useLocalDreaminaModelStore } from "@/stores/use-local-dreamina-model-store";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
+import { buildBackendToolRequests, type ResponseFunctionTool, type ResponseInputMessage, type ToolChoice, type ToolResponseResult } from "@/services/api/image";
+
+export { logicalModelIDForConfig };
 
 export type BackendGenerationMode = "text" | "image" | "video" | "audio";
 
@@ -18,6 +24,8 @@ export type BackendGenerationResult = {
     video?: { dataUrl: string; storageKey?: string; width?: number; height?: number; durationMs?: number; bytes?: number; mimeType?: string };
     audio?: { dataUrl: string; storageKey?: string; durationMs?: number; bytes?: number; mimeType?: string; format?: string };
     text?: string;
+    toolCalls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string }; thoughtSignature?: string }>;
+    reasoning?: string;
 };
 
 type BackendGenerationTaskOptions = {
@@ -28,10 +36,12 @@ type BackendGenerationTaskOptions = {
     referenceImages?: ReferenceImage[];
     referenceVideos?: ReferenceVideo[];
     referenceAudios?: ReferenceAudio[];
+    textHistory?: Array<{ role: "user" | "assistant" | "system"; content: string }>;
     mask?: ReferenceImage;
     signal?: AbortSignal;
     metadata?: Record<string, unknown>;
     onTaskUpdate?: (task: GenerationTask) => void;
+    onTextDelta?: (text: string) => void;
     localIdempotencyKey?: string;
     localResumeOnly?: boolean;
     clientOperationId?: string;
@@ -46,6 +56,7 @@ export type GenerationTaskDependencies = {
     runLocal: (input: LocalDreaminaGenerationInput, signal?: AbortSignal, onTaskUpdate?: (task: LocalDreaminaGenerationTask) => void) => ReturnType<typeof runLocalDreaminaGenerationTask>;
     createId: () => string;
     now: () => string;
+    ensureLocalDreaminaReady?: (signal?: AbortSignal) => Promise<unknown>;
 };
 
 const defaultDependencies: GenerationTaskDependencies = {
@@ -54,6 +65,7 @@ const defaultDependencies: GenerationTaskDependencies = {
     runLocal: (input, signal, onTaskUpdate) => runLocalDreaminaGenerationTask(input, { onTaskUpdate }, signal),
     createId: () => crypto.randomUUID(),
     now: () => new Date().toISOString(),
+    ensureLocalDreaminaReady: (signal) => useLocalDreaminaModelStore.getState().ensureReady(signal),
 };
 
 type PreparedGenerationReferences = {
@@ -73,6 +85,7 @@ export async function runBackendGenerationTask(
         referenceImages = [],
         referenceVideos = [],
         referenceAudios = [],
+        textHistory = [],
         mask,
         signal,
         metadata,
@@ -87,15 +100,69 @@ export async function runBackendGenerationTask(
 ) {
     throwIfAborted(signal);
     assertClientPromptLimit(mode, prompt, config, metadata);
-    if (isLocalDreaminaModel(config.model)) {
+    if (usesLocalDreamina(config)) {
+        await dependencies.ensureLocalDreaminaReady?.(signal);
+        throwIfAborted(signal);
         return await runLocalDreaminaGeneration(
-            { projectId, mode, prompt, config, referenceImages, referenceVideos, referenceAudios, mask, signal, metadata, onTaskUpdate, localIdempotencyKey, localResumeOnly, clientOperationId, retryOf, attemptGroupId },
+            { projectId, mode, prompt, config, referenceImages, referenceVideos, referenceAudios, textHistory, mask, signal, metadata, onTaskUpdate, localIdempotencyKey, localResumeOnly, clientOperationId, retryOf, attemptGroupId },
             dependencies,
         );
     }
+    assertBackendRuntimeConfigured(config, mode);
     const prepared = await prepareGenerationReferences({ referenceImages, referenceVideos, referenceAudios, mask });
     throwIfAborted(signal);
-    return createAndWaitGenerationTask({ projectId, mode, prompt, config, referenceImages, referenceVideos, referenceAudios, signal, metadata, onTaskUpdate }, prepared, dependencies);
+    return createAndWaitGenerationTask({ projectId, mode, prompt, config, referenceImages, referenceVideos, referenceAudios, textHistory, signal, metadata, onTaskUpdate }, prepared, dependencies);
+}
+
+// 分镜等后台生产流程只需要可靠提交任务；任务状态与产物由项目工作区轮询和
+// 后端自动回填负责，不能让页面 mutation 一直等待供应商完成。
+export async function submitBackendGenerationTask(
+    options: BackendGenerationTaskOptions,
+    dependencies: GenerationTaskDependencies = defaultDependencies,
+): Promise<GenerationTask> {
+    throwIfAborted(options.signal);
+    assertClientPromptLimit(options.mode, options.prompt, options.config, options.metadata);
+    if (usesLocalDreamina(options.config)) throw new Error("本机即梦任务暂不支持后台提交");
+    assertBackendRuntimeConfigured(options.config, options.mode);
+    const prepared = await prepareGenerationReferences(options);
+    throwIfAborted(options.signal);
+    return createBackendGenerationTask(options, prepared, dependencies);
+}
+
+export async function runBackendToolGenerationTask(options: {
+    prompt: string;
+    config: AiConfig;
+    messages: ResponseInputMessage[];
+    tools: ResponseFunctionTool[];
+    toolChoice: ToolChoice;
+    signal?: AbortSignal;
+    onDelta?: (text: string) => void;
+}): Promise<ToolResponseResult> {
+    throwIfAborted(options.signal);
+    const logicalModelId = logicalModelIDForConfig(options.config);
+    const requestConfig = resolveModelRequestConfig(options.config, options.config.model);
+    if (!logicalModelId && !requestConfig.channelId && !requestConfig.interfaceType) throw new Error("当前模型未选择可用请求协议");
+    const task = await createGenerationTask({
+        type: "canvas_text",
+        operation: "text",
+        prompt: options.prompt,
+        model: options.config.model,
+        ...(logicalModelId ? { logicalModelId } : {}),
+        input: {
+            mode: "text",
+            prompt: options.prompt,
+            config: backendProviderConfig(options.config),
+            agentRequests: buildBackendToolRequests(options.messages, options.tools, options.toolChoice, options.config),
+            metadata: { source: "canvas-online-agent" },
+        },
+    });
+    const completed = await waitForGenerationTask(task.id, { signal: options.signal, initialTask: task, onTextDelta: options.onDelta });
+    const result = parseBackendGenerationResult(completed);
+    return {
+        content: result.text || "",
+        toolCalls: result.toolCalls || [],
+        ...(result.reasoning ? { reasoning: result.reasoning } : {}),
+    };
 }
 
 export async function runBackendGenerationTaskBatch(options: BackendGenerationTaskOptions & { count: number }, dependencies: GenerationTaskDependencies = defaultDependencies) {
@@ -103,7 +170,9 @@ export async function runBackendGenerationTaskBatch(options: BackendGenerationTa
     throwIfAborted(options.signal);
     assertClientPromptLimit(options.mode, options.prompt, options.config, options.metadata);
     if (options.retryContextsByBatchIndex && options.retryContextsByBatchIndex.length !== count) throw new Error("生成重试批次任务数量不匹配");
-    if (isLocalDreaminaModel(options.config.model)) {
+    if (usesLocalDreamina(options.config)) {
+        await dependencies.ensureLocalDreaminaReady?.(options.signal);
+        throwIfAborted(options.signal);
         return Promise.allSettled(
             Array.from({ length: count }, (_, batchIndex) => {
                 const retryContext = options.retryContextsByBatchIndex?.[batchIndex];
@@ -191,7 +260,8 @@ async function runLocalDreaminaGeneration(options: BackendGenerationTaskOptions,
             },
         );
         const completedAt = dependencies.now();
-        options.onTaskUpdate?.({ ...task, status: "succeeded", progress: 100, stage: "local_cli_succeeded", resultJson: JSON.stringify(result), completedAt, updatedAt: completedAt });
+        latestPublicTask = { ...latestPublicTask, status: "succeeded", progress: 100, stage: "local_cli_succeeded", resultJson: JSON.stringify(result), completedAt, updatedAt: completedAt };
+        options.onTaskUpdate?.(latestPublicTask);
         return result;
     } catch (error) {
         const completedAt = dependencies.now();
@@ -200,7 +270,7 @@ async function runLocalDreaminaGeneration(options: BackendGenerationTaskOptions,
         const localErrorCode = error instanceof LocalDreaminaGenerationClientError ? error.code : undefined;
         if (!(cancelled && isLocalDreaminaBackgroundTask(latestPublicTask))) {
             options.onTaskUpdate?.({
-                ...task,
+                ...latestPublicTask,
                 status: cancelled ? "cancelled" : "failed",
                 stage: cancelled ? "local_cli_cancelled" : "local_cli_failed",
                 completedAt,
@@ -221,10 +291,13 @@ async function runLocalDreaminaGeneration(options: BackendGenerationTaskOptions,
 
 function generationOperation(options: BackendGenerationTaskOptions) {
     if (options.mode !== "video") return options.mode;
-    const imageCount = options.referenceImages?.length ?? 0;
-    if ((options.referenceVideos?.length ?? 0) > 0 || (options.referenceAudios?.length ?? 0) > 0 || imageCount > 2) return "reference_to_video";
-    if (imageCount > 0) return "image_to_video";
-    return "text_to_video";
+    return resolveVideoOperation({
+        textCount: 0,
+        imageCount: options.referenceImages?.length ?? 0,
+        videoCount: options.referenceVideos?.length ?? 0,
+        audioCount: options.referenceAudios?.length ?? 0,
+        characterCount: 0,
+    }, options.metadata?.videoEditOperation as string | undefined);
 }
 
 export function isGenerationTaskCancelled(error: unknown, signal?: AbortSignal) {
@@ -304,12 +377,23 @@ function isLocalDreaminaModel(model: string) {
     return /^local:dreamina-cli:[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$/.test(model.trim());
 }
 
+function usesLocalDreamina(config: AiConfig) {
+    return (config.taskWorkflowProvider || "model") === "model" && isLocalDreaminaModel(config.model);
+}
+
+function assertBackendRuntimeConfigured(config: AiConfig, mode: BackendGenerationMode) {
+    if (resolveGenerationWorkflowExecution(config, mode)) return;
+    if (logicalModelIDForConfig(config)) return;
+    const requestConfig = resolveModelRequestConfig(config, config.model);
+    if (!requestConfig.channelId && !requestConfig.interfaceType) throw new Error("当前模型未选择可用请求协议，请先在模型设置中选择协议插件");
+}
+
 function throwIfAborted(signal?: AbortSignal) {
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 }
 
 function assertClientPromptLimit(mode: BackendGenerationMode, prompt: string, config: AiConfig, metadata?: Record<string, unknown>) {
-    if (mode !== "image" || metadata?.promptTemplateOperation) return;
+    if (mode !== "image" || metadata?.promptTemplateOperation || (config.taskWorkflowProvider || "model") !== "model") return;
     const requestConfig = resolveModelRequestConfig(config, config.model);
     const promptLimitError = grokImagePromptLimitError(prompt, requestConfig.interfaceType, requestConfig.model);
     if (promptLimitError) throw new Error(promptLimitError);
@@ -329,28 +413,57 @@ async function prepareGenerationReferences({
 }
 
 async function createAndWaitGenerationTask(options: BackendGenerationTaskOptions, prepared: PreparedGenerationReferences, dependencies: GenerationTaskDependencies) {
-    const { projectId, mode, prompt, config, signal, metadata, onTaskUpdate } = options;
+    const task = await createBackendGenerationTask(options, prepared, dependencies);
+    const { signal, onTaskUpdate, onTextDelta } = options;
+    const completed = await dependencies.waitTask(task.id, { signal, initialTask: task, onTaskUpdate, onTextDelta });
+    return parseBackendGenerationResult(completed);
+}
+
+async function createBackendGenerationTask(options: BackendGenerationTaskOptions, prepared: PreparedGenerationReferences, dependencies: GenerationTaskDependencies) {
+    const { projectId, mode, prompt, config, metadata, onTaskUpdate } = options;
     const videoOperation = generationOperation(options);
+    const workflow = resolveGenerationWorkflowExecution(config, mode);
+    const logicalModelId = workflow ? "" : logicalModelIDForConfig(config);
     const task = await dependencies.createTask({
         ...(projectId ? { projectId } : {}),
         type: `canvas_${mode}`,
         operation: mode === "video" ? videoOperation : mode,
         prompt,
-        model: config.model,
+        ...(workflow ? { provider: workflow.provider } : {}),
+        model: workflow?.taskModel || config.model,
+        ...(logicalModelId ? { logicalModelId } : {}),
         input: {
             mode,
             prompt,
-            config: backendProviderConfig(config),
+            ...(workflow ? { execution: workflowPublicExecution(workflow) } : {}),
+            config: backendProviderConfig(config, mode),
+            capabilityOptions: logicalModelId ? logicalCapabilityOptions(config, mode) : undefined,
+            textHistory: options.textHistory,
             referenceImages: prepared.referenceImages,
             referenceVideos: prepared.referenceVideos,
             referenceAudios: prepared.referenceAudios,
             mask: prepared.mask,
-            metadata,
+            metadata: generationMetadata(config, metadata),
         },
     });
     onTaskUpdate?.(task);
-    const completed = await dependencies.waitTask(task.id, { signal, initialTask: task, onTaskUpdate });
-    return parseBackendGenerationResult(completed);
+    return task;
+}
+
+function generationMetadata(config: AiConfig, metadata?: Record<string, unknown>) {
+    const channel = resolveModelChannel(config, config.model);
+    const model = modelOptionName(config.model);
+    const modelCost = channel.modelCosts?.find((item) => item.model === model);
+    const protocol = modelCost?.protocol || channel.interfaceType;
+    const defaults = modelCost?.defaultOptions;
+    if (!protocol || !defaults || !Object.keys(defaults).length) return metadata;
+    const existing = metadata?.providerOptions && typeof metadata.providerOptions === "object" && !Array.isArray(metadata.providerOptions)
+        ? metadata.providerOptions as Record<string, unknown>
+        : {};
+    const namespace = existing[protocol] && typeof existing[protocol] === "object" && !Array.isArray(existing[protocol])
+        ? existing[protocol] as Record<string, unknown>
+        : {};
+    return { ...metadata, providerOptions: { ...existing, [protocol]: { ...defaults, ...namespace } } };
 }
 
 async function prepareBackendMediaReference(media: ReferenceVideo | ReferenceAudio) {
@@ -413,8 +526,27 @@ function backendMediaReference<T extends ReferenceVideo | ReferenceAudio>(media:
     } as T;
 }
 
-export function backendProviderConfig(config: AiConfig) {
+export function backendProviderConfig(config: AiConfig, mode: BackendGenerationMode = "image") {
     const requestConfig = resolveModelRequestConfig(config, config.model);
+    const workflow = resolveGenerationWorkflowExecution(config, mode);
+    if (workflow) return workflowProviderConfig(config, requestConfig, workflow);
+    const generationOptions = {
+        size: config.size,
+        quality: config.quality,
+        transparentBackground: config.transparentBackground,
+        count: config.count,
+        videoSeconds: config.videoSeconds,
+        vquality: config.vquality,
+        videoGenerateAudio: config.videoGenerateAudio,
+        videoWatermark: config.videoWatermark,
+        videoArkPrivateAssetUpload: config.videoArkPrivateAssetUpload,
+        audioVoice: config.audioVoice,
+        audioFormat: config.audioFormat,
+        audioSpeed: config.audioSpeed,
+        audioInstructions: config.audioInstructions,
+        systemPrompt: config.systemPrompt,
+    };
+    if (logicalModelIDForConfig(config)) return generationOptions;
     return {
         channelId: requestConfig.channelId,
         apiFormat: requestConfig.apiFormat,
@@ -424,6 +556,26 @@ export function backendProviderConfig(config: AiConfig) {
         apiKey: requestConfig.apiKey,
         secretKey: requestConfig.secretKey,
         model: requestConfig.model,
+        ...generationOptions,
+        capabilityConfig: modelCapabilityConfigFor(config, requestConfig.model),
+        systemPrompt: config.systemPrompt,
+    };
+}
+
+function workflowProviderConfig(config: AiConfig, requestConfig: ReturnType<typeof resolveModelRequestConfig>, workflow: GenerationWorkflowExecution) {
+    const runningHubActive = workflow.provider === "runninghub";
+    const comfyBridgeActive = workflow.provider === "comfyui-bridge";
+    return {
+        channelId: "",
+        apiFormat: requestConfig.apiFormat,
+        interfaceType: workflow.interfaceType,
+        baseUrl: comfyBridgeActive ? "bridge://local" : config.runningHub.baseUrl,
+        allowLocalChannel: false,
+        apiKey: runningHubActive ? config.runningHub.apiKey : "",
+        // 工作流是独立 Provider，不能继承普通模型渠道的密钥和自定义头。
+        secretKey: "",
+        headers: [],
+        model: workflow.providerModel,
         size: config.size,
         quality: config.quality,
         transparentBackground: config.transparentBackground,
@@ -432,13 +584,46 @@ export function backendProviderConfig(config: AiConfig) {
         vquality: config.vquality,
         videoGenerateAudio: config.videoGenerateAudio,
         videoWatermark: config.videoWatermark,
+        videoArkPrivateAssetUpload: config.videoArkPrivateAssetUpload,
         audioVoice: config.audioVoice,
         audioFormat: config.audioFormat,
         audioSpeed: config.audioSpeed,
         audioInstructions: config.audioInstructions,
+        workflowId: workflow.workflowId,
+        webappId: workflow.webappId,
+        workflowJson: workflow.workflowJson,
+        workflowFields: workflow.workflowFields,
+        bridgeId: workflow.bridgeId,
+        runningHubUseWallet: false,
+        runningHubWalletApiKey: "",
+        runningHubUploadApiKey: runningHubActive ? config.runningHub.uploadApiKey || "" : "",
         capabilityConfig: modelCapabilityConfigFor(config, requestConfig.model),
-        systemPrompt: "",
+        systemPrompt: config.systemPrompt,
     };
+}
+
+function workflowPublicExecution(workflow: GenerationWorkflowExecution) {
+    return {
+        provider: workflow.provider,
+        kind: workflow.kind,
+        interfaceType: workflow.interfaceType,
+        name: workflow.name,
+        ...(workflow.workflowId ? { workflowId: workflow.workflowId } : {}),
+        ...(workflow.webappId ? { webappId: workflow.webappId } : {}),
+    };
+}
+
+function logicalCapabilityOptions(config: AiConfig, mode: BackendGenerationMode) {
+    const channel = resolveModelChannel(config, config.model);
+    const spec = channel.modelCosts?.find((item) => item.model === modelOptionName(config.model))?.logicalCapabilitySpec;
+    const candidates: Record<string, unknown> = mode === "image"
+        ? { size: config.size, quality: config.quality, transparentBackground: config.transparentBackground === "true", count: Number(config.count) }
+        : mode === "video"
+            ? { size: config.size, videoSeconds: Number(config.videoSeconds), vquality: config.vquality, videoGenerateAudio: config.videoGenerateAudio === "true", videoWatermark: config.videoWatermark === "true" }
+            : mode === "audio"
+                ? { audioVoice: config.audioVoice, audioFormat: config.audioFormat, audioSpeed: Number(config.audioSpeed) }
+                : {};
+    return Object.fromEntries(Object.entries(candidates).filter(([key]) => Boolean(spec?.options?.[key])));
 }
 
 export function parseBackendGenerationResult(task: GenerationTask): BackendGenerationResult {

@@ -1,6 +1,7 @@
 import { getActiveUserScope } from "@/lib/user-scope";
 import axios from "axios";
 import { apiBaseURL, apiClient, request, type BackendEnvelope } from "@/services/api/request";
+import type { OSSConnectionTestInput, OSSConnectionTestResult, OSSProvider, S3Preset } from "@/lib/oss-settings";
 
 export type RemoteResource = {
     id: string;
@@ -25,25 +26,48 @@ export type RemoteResource = {
 
 export type UserOSSSetting = {
     enabled: boolean;
-    provider: "aliyun" | "tencent";
+    provider: OSSProvider;
+    s3Preset: S3Preset;
     region: string;
     endpoint: string;
     cdnBaseUrl: string;
     bucket: string;
     accessKeyId: string;
     hasAccessKeySecret: boolean;
+    sessionToken?: string;
+    hasSessionToken: boolean;
+    pathStyle: boolean;
+    allowUserS3: boolean;
     publicBaseUrl: string;
     pathPrefix: string;
+    testedAt?: string;
+    testedDigest?: string;
+    historyCount?: number;
+    referencedResourceCount?: number;
     updatedAt?: string;
 };
 
-export type UserOSSSettingInput = Pick<UserOSSSetting, "enabled" | "provider" | "region" | "endpoint" | "cdnBaseUrl" | "bucket" | "accessKeyId" | "pathPrefix"> & {
+export type UserOSSSettingInput = Pick<UserOSSSetting, "enabled" | "provider" | "s3Preset" | "region" | "endpoint" | "cdnBaseUrl" | "bucket" | "accessKeyId" | "pathPrefix" | "pathStyle"> & {
     accessKeySecret?: string;
+    sessionToken?: string;
 };
 
 export type AccountFileStorageUsage = {
     usedBytes: number;
     totalBytes: number;
+};
+
+export type ArkPrivateAssetSync = {
+    resourceId: string;
+    status: "active" | string;
+};
+
+type ResourceUploadMeta = {
+    width?: number;
+    height?: number;
+    durationMs?: number;
+    fileName?: string;
+    idempotencyKey?: string;
 };
 
 const api = apiClient;
@@ -63,9 +87,18 @@ export function updateUserOSSSetting(input: UserOSSSettingInput) {
     return request<{ setting: UserOSSSetting }>(api.patch("/settings/oss", input));
 }
 
+export function testUserOSSConnection(input: OSSConnectionTestInput) {
+    return request<OSSConnectionTestResult>(api.post("/settings/oss/test", input));
+}
+
 export async function getAccountFileStorageUsage() {
     const data = await request<{ usage: AccountFileStorageUsage }>(api.get("/resources/storage-usage"));
     return data.usage;
+}
+
+export async function syncResourceToArkPrivateAsset(id: string) {
+    const data = await request<{ sync: ArkPrivateAssetSync }>(api.post(`/resources/${encodeURIComponent(id)}/ark-private-asset`));
+    return data.sync;
 }
 
 export function resourceIdFromStorageKey(storageKey?: string) {
@@ -78,7 +111,7 @@ export function isResourceUrl(url?: string) {
     return path.startsWith(`${base}/resources/`) && path.endsWith("/file");
 }
 
-export async function uploadResourceFile(file: Blob, kind: "image" | "video" | "audio" | "file", meta?: { width?: number; height?: number; durationMs?: number; fileName?: string }) {
+export async function uploadResourceFile(file: Blob, kind: "image" | "video" | "audio" | "file", meta?: ResourceUploadMeta) {
     const formData = new FormData();
     const name = meta?.fileName || (file instanceof File ? file.name : `${kind}.${extensionFromMime(file.type, kind)}`);
     formData.append("kind", kind);
@@ -86,15 +119,20 @@ export async function uploadResourceFile(file: Blob, kind: "image" | "video" | "
     if (meta?.width) formData.append("width", String(Math.round(meta.width)));
     if (meta?.height) formData.append("height", String(Math.round(meta.height)));
     if (meta?.durationMs) formData.append("durationMs", String(Math.round(meta.durationMs)));
-    const data = await request<{ resource: RemoteResource }>(api.post("/resources", formData));
+    const data = await request<{ resource: RemoteResource }>(api.post("/resources", formData, uploadRequestConfig(meta?.idempotencyKey)));
     resourceCache.set(resourceCacheKey(data.resource.id), data.resource);
     return data.resource;
 }
 
-export async function importResourceFromUrl(url: string, kind: "image" | "video" | "audio" | "file", meta?: { width?: number; height?: number; durationMs?: number }) {
-    const data = await request<{ resource: RemoteResource }>(api.post("/resources/import", { url, kind, width: meta?.width, height: meta?.height, durationMs: meta?.durationMs }));
+export async function importResourceFromUrl(url: string, kind: "image" | "video" | "audio" | "file", meta?: Omit<ResourceUploadMeta, "fileName">) {
+    const data = await request<{ resource: RemoteResource }>(api.post("/resources/import", { url, kind, width: meta?.width, height: meta?.height, durationMs: meta?.durationMs }, uploadRequestConfig(meta?.idempotencyKey)));
     resourceCache.set(resourceCacheKey(data.resource.id), data.resource);
     return data.resource;
+}
+
+function uploadRequestConfig(idempotencyKey?: string) {
+    const value = idempotencyKey?.trim();
+    return value ? { headers: { "X-Idempotency-Key": value } } : undefined;
 }
 
 export function getResource(id: string): Promise<RemoteResource> {
@@ -137,7 +175,7 @@ function resourceCacheKey(id: string) {
 
 export function resourceFileUrl(id: string) {
     const base = String(apiBaseURL).replace(/\/+$/, "");
-    return `${base}/resources/${encodeURIComponent(id)}/file?direct=1`;
+    return `${base}/resources/${encodeURIComponent(id)}/file`;
 }
 
 function resourceProxyFileUrl(id: string) {
@@ -145,11 +183,11 @@ function resourceProxyFileUrl(id: string) {
     return `${base}/resources/${encodeURIComponent(id)}/file?proxy=1`;
 }
 
-export async function resolveResourceUrl(storageKey?: string, fallback = "") {
+export function resolveResourceUrl(storageKey?: string, fallback = "") {
     const id = resourceIdFromStorageKey(storageKey);
-    if (!id) return fallback;
-    const resource = await getResource(id).catch(() => null);
-    return resource ? resource.publicUrl || resourceFileUrl(id) : fallback;
+    // 资源引用本身已经包含稳定 ID；恢复/展示阶段不需要再查一遍元数据。
+    // 需要 publicUrl、mime 或尺寸时必须显式调用 getResource，避免隐式 N+1。
+    return id ? resourceFileUrl(id) : fallback;
 }
 
 export async function getResourceBlob(storageKey: string) {

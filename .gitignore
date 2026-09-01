@@ -10,6 +10,9 @@ coverage/
 dist/
 *.log
 *.tsbuildinfo
+/web/public/OpenAICanvas-ComfyBridge.exe
+/web/public/OpenAICanvas-ComfyBridge-linux-amd64
+/web/public/OpenAICanvas-ComfyBridge-linux-arm64
 *.db
 *.db-*
 *.sqlite
@@ -33,3 +36,5 @@ assets/prototypes/.*.drawio.bkp
 .spec-workflow/
 .vscode/
 camera_language_guide.md
+.superdesign
+.playwright-cli/

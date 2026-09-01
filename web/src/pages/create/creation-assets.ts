@@ -1,5 +1,8 @@
 import type { UploadedFile } from "@/services/file-storage";
 import type { UploadedImage } from "@/services/image-storage";
+import { canvasVideoAssetPreviewUrl } from "@/lib/canvas/canvas-media-preview";
+import { resolveResourceUrl } from "@/services/api/resources";
+import type { ExternalAssetPickerReference } from "@/lib/plugins/plugin-types";
 import type { Asset, AudioAsset, ImageAsset, NewAsset } from "@/stores/use-asset-store";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
@@ -149,7 +152,7 @@ export function creationAttachmentFromDocument(file: File, uploaded: UploadedFil
 }
 
 export function creationAttachmentFromAsset(asset: ImageAsset): CreationAttachment {
-    const url = asset.data.dataUrl || asset.coverUrl;
+    const url = resolveResourceUrl(asset.data.storageKey, asset.data.dataUrl || asset.coverUrl);
     return {
         id: `asset:${asset.id}`,
         name: asset.title || "素材图片",
@@ -192,6 +195,49 @@ export function creationAttachmentFromAudioAsset(asset: AudioAsset): CreationAtt
     };
 }
 
+export function creationAttachmentFromExternalAsset(reference: ExternalAssetPickerReference): CreationAttachment {
+    const item = reference.item;
+    const url = item.fileUrl || "";
+    if (!url) throw new Error("“" + item.title + "”暂时无法读取，请先在 Eagle 中确认文件可用");
+    const id = "external:" + reference.sourceId + ":" + item.id;
+    const type = item.mimeType || (item.kind === "image" ? "image/png" : item.kind === "video" ? "video/mp4" : "audio/mpeg");
+    if (item.kind === "image") {
+        return {
+            id,
+            name: item.title || "素材图片",
+            type,
+            dataUrl: url,
+            url,
+            bytes: item.bytes,
+            width: item.width,
+            height: item.height,
+            previewUrl: item.thumbnailUrl || url,
+        };
+    }
+    if (item.kind === "video") {
+        return {
+            id,
+            name: item.title || "素材视频",
+            type,
+            url,
+            bytes: item.bytes,
+            width: item.width,
+            height: item.height,
+            previewUrl: item.thumbnailUrl || url,
+        };
+    }
+    if (item.kind === "audio") {
+        return {
+            id,
+            name: item.title || "素材音频",
+            type,
+            url,
+            bytes: item.bytes,
+            previewUrl: item.thumbnailUrl || url,
+        };
+    }
+    throw new Error("“" + item.title + "”不是可用于创作参考的媒体文件");
+}
 export function creationImageAsset({ title, uploaded, metadata }: { title: string; uploaded: UploadedImage; metadata?: Record<string, unknown> }): NewAsset {
     return {
         kind: "image",
@@ -235,7 +281,7 @@ export function creationVideoAsset({ title, uploaded, metadata }: { title: strin
     return {
         kind: "video",
         title: title.trim() || "创作视频",
-        coverUrl: uploaded.url,
+        coverUrl: canvasVideoAssetPreviewUrl(uploaded.url, uploaded.preview?.url),
         tags: ["创作"],
         status: "confirmed",
         source: "创作页",
